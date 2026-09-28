@@ -11,6 +11,7 @@ seconds to finish, cancels the rest, and checkpoints every unfinished job as
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import secrets
 import time
@@ -19,6 +20,11 @@ from .logs import job_id as job_ctx
 from .logs import request_id as request_ctx
 
 log = logging.getLogger("jobs")
+
+
+class QueueSaturated(RuntimeError):
+    """Raised by submit() when the target lane is full; a RuntimeError so existing
+    callers that already handle RuntimeError keep working without a code change."""
 
 
 class Coordinator:
@@ -65,11 +71,27 @@ class Coordinator:
         if self.closing:
             raise RuntimeError("shutting down; not accepting new jobs")
         job_id = f"job_{secrets.token_hex(5)}"
-        self.cache.put_job(job_id, campaign_id, kind, candidate_id, "queued")
-        self.stopped.discard(campaign_id)
         item = (job_id, campaign_id, kind, candidate_id, request_ctx.get())
-        # thread-safe: sync route handlers run in a threadpool
-        asyncio.run_coroutine_threadsafe(self.queues[self.lane(kind)].put(item), self.loop)
+        q = self.queues[self.lane(kind)]
+
+        # thread-safe: sync route handlers run in a threadpool. put_nowait (not put) so a
+        # full queue rejects immediately instead of the caller blocking forever, and the
+        # DB row below is only written once the item is actually queued (no orphan rows).
+        fut = concurrent.futures.Future()
+
+        def _try_put():
+            try:
+                q.put_nowait(item)
+                fut.set_result(True)
+            except asyncio.QueueFull:
+                fut.set_result(False)
+
+        self.loop.call_soon_threadsafe(_try_put)
+        if not fut.result():
+            raise QueueSaturated(f"{self.lane(kind)} queue is full")
+
+        self.stopped.discard(campaign_id)
+        self.cache.put_job(job_id, campaign_id, kind, candidate_id, "queued")
         return job_id
 
     async def _run(self, lane):

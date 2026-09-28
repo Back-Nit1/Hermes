@@ -28,14 +28,19 @@ class OpenAIModel:
         self.cache = cache
         self.sem = asyncio.Semaphore(2)  # shared by both workers: one account, one budget
 
-    def _check_budget(self, campaign_id):
-        u = self.cache.usage(campaign_id)
-        if u["api_calls"] >= u["budget"]:
+    def _reserve(self, campaign_id):
+        """Atomically claim one call against the budget. A single UPDATE under the cache's
+        lock, so two concurrent workers can't both pass a check-then-increment race."""
+        self.cache.usage(campaign_id)  # ensure the row exists
+        claimed = self.cache.x(
+            "UPDATE usage SET api_calls=api_calls+1 WHERE campaign_id=? AND api_calls<budget", (campaign_id,)
+        )
+        if not claimed:
+            u = self.cache.usage(campaign_id)
             raise BudgetExceeded(f"campaign API budget of {u['budget']} calls used")
 
     async def structured(self, campaign_id, instructions, user_input, schema_name, schema, web_search=False):
         """Returns (parsed_json, cited_urls). Retries transient errors with backoff."""
-        self._check_budget(campaign_id)
         kwargs = dict(
             model=self.model,
             instructions=instructions,
@@ -47,6 +52,7 @@ class OpenAIModel:
             kwargs["include"] = ["web_search_call.action.sources"]
         delay = 2
         for attempt in range(3):
+            self._reserve(campaign_id)  # every attempt is billable: reserve before each try, not just once
             try:
                 async with self.sem:
                     resp = await self.client.responses.create(**kwargs)
@@ -55,12 +61,11 @@ class OpenAIModel:
                 status = getattr(e, "status_code", None)
                 if attempt == 2 or (status and status < 500 and status != 429):
                     raise ModelError(f"{type(e).__name__}: {str(e)[:200]}") from e
-                await asyncio.sleep(delay)
+                await asyncio.sleep(delay)  # CancelledError (BaseException) isn't caught above; cancellation wins
                 delay *= 3
         usage = getattr(resp, "usage", None)
         self.cache.bump_usage(
             campaign_id,
-            api_calls=1,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
         )
