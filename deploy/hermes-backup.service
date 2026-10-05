@@ -1,16 +1,19 @@
 # Nightly encrypted backup. Copy the encrypted files off the machine separately (see docs/remote-deployment.md).
 [Unit]
-Description=HERMES encrypted backup
+Description=HERMES encrypted backup (stops hermes.service briefly)
+After=hermes.service
 
 [Service]
 Type=oneshot
-User=hermes
-Group=hermes
+# Runs as root only to stop/start hermes.service; the script drops to the hermes user (setpriv) for all data access,
+# so CAP_SETUID/CAP_SETGID are the only capabilities it keeps. It must outlive the app's graceful stop (TimeoutStopSec).
+User=root
 WorkingDirectory=/opt/hermes
 EnvironmentFile=/etc/hermes/hermes.env
 # Root-owned 0600 file; exposed only to this unit, never to the app process.
 LoadCredential=backup-passphrase:/etc/hermes/backup-passphrase
 ExecStart=/opt/hermes/deploy/hermes-backup.sh
+TimeoutStartSec=30min
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -23,8 +26,9 @@ ProtectControlGroups=true
 LockPersonality=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
-RestrictAddressFamilies=AF_UNIX
+# AF_UNIX: systemctl/D-Bus. AF_INET: readiness probe to 127.0.0.1 only.
+RestrictAddressFamilies=AF_UNIX AF_INET
 SystemCallArchitectures=native
-CapabilityBoundingSet=
-StateDirectory=hermes
-ReadWritePaths=/var/backups/hermes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+# The data root needs write access only for the exclusive .lock file the backup takes.
+ReadWritePaths=/var/backups/hermes /var/lib/hermes
