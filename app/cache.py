@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .migrations import migrate_sqlite
+from .operational_metrics import metrics
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS pages (
@@ -379,7 +380,7 @@ class Cache:
 
     @contextmanager
     def tx(self):
-        with self.lock:
+        with metrics.time_sqlite(), self.lock:
             self.db.execute("BEGIN")
             try:
                 yield
@@ -396,17 +397,17 @@ class Cache:
         return self.q("SELECT 1 AS ok")[0]["ok"] == 1
 
     def q(self, sql, args=()):
-        with self.lock:
+        with metrics.time_sqlite(), self.lock:  # timed from before the lock: waiting on it is the contention signal
             return [dict(r) for r in self.db.execute(sql, args).fetchall()]
 
     def x(self, sql, args=()):
         """Execute; returns affected row count (used for compare-and-set claims)."""
-        with self.lock:
+        with metrics.time_sqlite(), self.lock:
             return self.db.execute(sql, args).rowcount
 
     def upsert(self, table, keys, **fields):
         """Insert the key row if missing, then set fields. Table/column names are code constants, never input."""
-        with self.lock:
+        with metrics.time_sqlite(), self.lock:
             self.db.execute(
                 f"INSERT OR IGNORE INTO {table} ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                 tuple(keys.values()),

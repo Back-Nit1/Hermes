@@ -154,6 +154,7 @@ def create_app(service=None, token=None, config=None):
         log.info("stopped")
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.runtime = state  # process-internal handle (tests, embedding); never serialized
     app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
     # ------------------------------------------------------------ request guard
@@ -270,16 +271,36 @@ def create_app(service=None, token=None, config=None):
     def healthz():
         return {"status": "ok"}
 
+    def _safe(probe):
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+
     @app.get("/readyz")
     def readyz():
+        extra = {}
         checks = {"data_root_writable": os.access(cfg.data_root if cfg.remote else state["svc"].store.root, os.W_OK)}
         if cfg.remote:
             checks["auth_db"] = bool(state["accounts"].q("SELECT 1 AS ok"))
+            # Initialized per-user services: report only counts, never whose they are.
+            users = list(state["services"].values())
+            dbs = [_safe(u.cache.ping) for u in users]
+            workers = [_safe(u.jobs.alive) for u in users]
+            checks["user_databases"] = all(dbs)
+            checks["user_workers"] = all(workers)
+            extra = {
+                "user_services": {
+                    "initialized": len(users),
+                    "bad_db": dbs.count(False),
+                    "dead_workers": workers.count(False),
+                }
+            }
         else:
             checks["cache_db"] = state["svc"].cache.ping()
             checks["workers"] = state["svc"].jobs.alive()
         ok = all(checks.values())
-        return JSONResponse({"ready": ok, "checks": checks}, 200 if ok else 503)
+        return JSONResponse({"ready": ok, "checks": checks, **extra}, 200 if ok else 503)
 
     # ------------------------------------------------------------ remote accounts
     @app.get("/auth/session")
@@ -471,6 +492,11 @@ def create_app(service=None, token=None, config=None):
             "schema": {"sqlite": len(cache_mod.MIGRATIONS), "json": contracts.SCHEMA_VERSION},
             **s.diagnostics(),
         }
+
+    @app.get("/api/metrics")
+    def metrics_view(s: Svc):
+        """Redacted operational numbers for the caller's own service plus process-wide latency/disk. No labels from user data."""
+        return {"version": VERSION, "mode": cfg.mode, **s.metrics_snapshot()}
 
     @app.post("/api/parse")
     async def parse(body: dict = Body(...)):

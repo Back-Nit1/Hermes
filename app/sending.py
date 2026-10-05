@@ -26,6 +26,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .gmail import http_status
+from .operational_metrics import metrics
 
 log = logging.getLogger("sending")
 
@@ -428,6 +429,7 @@ class Outbox:
         for r in self._rows("status='sending'"):
             self._update(r["send_id"], status="uncertain", error="process stopped during send")
             self.audit(r["send_id"], "recovered_after_crash")
+            metrics.uncertain_send()
         self._apply_pending_deliveries()
 
     def tick(self):
@@ -513,6 +515,7 @@ class Outbox:
             else:  # timeout / 5xx / network: Gmail may or may not have acted
                 self._update(sid, status="uncertain", error=err)
                 self.audit(sid, "uncertain", error=err, http_status=status)
+                metrics.uncertain_send()
             return
         delivered_at, rfc_id = self.clock(), self.row(sid).get("rfc_message_id")
         try:

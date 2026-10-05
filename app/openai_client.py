@@ -7,6 +7,9 @@ reuse the prefix; per-person content goes last.
 import asyncio
 import json
 import os
+import time
+
+from .operational_metrics import metrics
 
 
 class BudgetExceeded(Exception):
@@ -50,16 +53,21 @@ class OpenAIModel:
             kwargs["include"] = ["web_search_call.action.sources"]
         delay = 2
         for attempt in range(3):
+            started = None  # set only once the request goes out; a budget refusal is not a provider call
             try:
                 async with self.sem:
                     await self._reserve_attempt(campaign_id)
+                    started = time.perf_counter()
                     resp = await self.client.responses.create(**kwargs)
+                metrics.provider_call(time.perf_counter() - started, retries=1 if attempt else 0)
                 break
             except asyncio.CancelledError:
                 raise
             except BudgetExceeded:
                 raise
             except Exception as e:  # openai.APIError subclasses; keep message short
+                if started is not None:  # every attempt after the first is a retry
+                    metrics.provider_call(time.perf_counter() - started, retries=1 if attempt else 0)
                 status = getattr(e, "status_code", None)
                 if attempt == 2 or (status and status < 500 and status != 429):
                     raise ModelError(f"{type(e).__name__}: {str(e)[:200]}") from e

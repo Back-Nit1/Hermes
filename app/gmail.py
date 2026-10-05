@@ -24,8 +24,11 @@ import base64
 import hashlib
 import json
 import os
+import time
 from email.message import EmailMessage
 from pathlib import Path
+
+from .operational_metrics import metrics
 
 COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
 METADATA = "https://www.googleapis.com/auth/gmail.metadata"
@@ -82,6 +85,7 @@ def build_message(
 
 def _run(request):
     """Execute; map auth failures to GmailAuthError and a missing thread/draft to KeyError."""
+    started = time.perf_counter()
     try:
         return request.execute()
     except Exception as e:
@@ -92,6 +96,8 @@ def _run(request):
         if status == 404:
             raise KeyError("not found in Gmail") from e
         raise
+    finally:
+        metrics.provider_call(time.perf_counter() - started)
 
 
 def _ids(res, message_id=None):

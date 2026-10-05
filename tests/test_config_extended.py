@@ -86,3 +86,9 @@ def test_capacity_defaults_preserve_load_tested_queue(tmp_path):
     assert (c.research_workers, c.job_queue_size) == (4, 64)
     d = cfg(tmp_path)
     assert (d.research_workers, d.job_queue_size) == (2, 512)
+
+
+def test_backup_dir_optional_and_absolute(tmp_path):
+    assert cfg(tmp_path).backup_dir is None
+    assert cfg(tmp_path, HERMES_BACKUP_DIR=str(tmp_path / "b")).backup_dir == tmp_path / "b"
+    bad(tmp_path, "HERMES_BACKUP_DIR", HERMES_BACKUP_DIR="relative/dir")

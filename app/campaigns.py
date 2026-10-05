@@ -22,6 +22,7 @@ from .gmail import GmailAuthError
 from .jobs import Coordinator
 from .ledger import MANUAL_INTERACTIONS, Ledger, clean_tags
 from .openai_client import BudgetExceeded, ModelError
+from .operational_metrics import metrics
 from .ranking import clean_weights, score_candidate
 from .sending import Outbox, payload_hash
 from .storage import now_iso
@@ -189,6 +190,8 @@ class CampaignService:
         self.outbox.on_delivery = self._record_delivery
         self.outbox.on_outcome = self._outbound_outcome
         self.gmail_sync_interval = cfg.gmail_sync_interval
+        self.last_gmail_sync = None  # epoch seconds of the last successful sync, for metrics
+        self.backup_dir = cfg.backup_dir
         self.send_every = send_every  # None lets tests drive the scheduler explicitly
 
     async def parse_intake(self, text, mode=None, subtype=None):
@@ -274,6 +277,7 @@ class CampaignService:
             self._require(campaign_id)
         res = await asyncio.to_thread(self.outreach.sync, campaign_id)
         res["followups_queued"] = self.outreach.tick()
+        self.last_gmail_sync = time.time()
         return res
 
     def _link_all(self, campaign_id):
@@ -2016,6 +2020,25 @@ class CampaignService:
             "workers_alive": self.jobs.alive(),
             "running_jobs": self.jobs.running,
         }
+
+    def metrics_snapshot(self):
+        """Redacted operational metrics: numbers and fixed lane names only (see operational_metrics)."""
+        newest = None
+        if self.backup_dir:
+            try:
+                newest = max((p.stat().st_mtime for p in self.backup_dir.glob("*.hbk")), default=None)
+            except OSError:
+                pass
+        snap = metrics.snapshot(
+            queues=self.jobs.queue_times(),
+            gmail_last_sync=self.last_gmail_sync if self.gmail else None,
+            data_root=self.store.root,
+            backup_written_at=newest,
+        )
+        snap.pop("services")  # process-wide names are not meaningful per service; /readyz reports counts
+        snap["uncertain_pending"] = len(self.outbox._rows("status='uncertain'"))
+        snap["workers_alive"] = self.jobs.alive()
+        return snap
 
     # ---------------------------------------------------------------- control
     def stop(self, campaign_id):

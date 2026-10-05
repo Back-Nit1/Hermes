@@ -11,6 +11,7 @@ import re
 import shutil
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
 _LABEL = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -19,12 +20,12 @@ _LAT_WINDOW = 500  # recent samples kept per latency series
 
 class _Series:
     def __init__(self):
-        self.samples = []
+        self.samples = deque(maxlen=_LAT_WINDOW)  # hot path (every SQLite call): O(1) append
         self.count = 0
 
     def add(self, seconds):
         self.count += 1
-        self.samples = (self.samples + [seconds])[-_LAT_WINDOW:]
+        self.samples.append(seconds)
 
     def summary(self):
         s = sorted(self.samples)
@@ -61,8 +62,20 @@ class Metrics:
         with self._lock:
             self.uncertain_sends += 1
 
-    def snapshot(self, *, queues=None, gmail_last_sync=None, data_root=None, services=(), backup_verified_at=None):
-        """queues: {name: [enqueue epoch seconds, ...]}; gmail_last_sync / backup_verified_at: epoch seconds or None."""
+    def snapshot(
+        self,
+        *,
+        queues=None,
+        gmail_last_sync=None,
+        data_root=None,
+        services=(),
+        backup_verified_at=None,
+        backup_written_at=None,
+    ):
+        """queues: {name: [enqueue epoch seconds, ...]}; gmail_last_sync / backup_*_at: epoch seconds or None.
+
+        backup_written_at: when the newest backup file was completed (it is not restore-verified);
+        backup_verified_at is for a real restore check and stays None until one exists."""
         now = self._clock()
         age = lambda t: None if t is None else max(0, round(now - t, 1))  # noqa: E731
         out_q = {}
@@ -78,6 +91,7 @@ class Metrics:
             }
         out["gmail_sync_age_s"] = age(gmail_last_sync)
         out["backup_verified_age_s"] = age(backup_verified_at)
+        out["backup_age_s"] = age(backup_written_at)
         names = sorted({str(s) for s in services if _LABEL.fullmatch(str(s))})
         out["services"] = {"active": len(names), "names": names}
         out["disk"] = None
