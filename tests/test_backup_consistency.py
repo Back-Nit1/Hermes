@@ -292,3 +292,16 @@ def test_newer_sqlite_schema_inside_backup_rejected(tmp_path):
     with pytest.raises(ops.OpsError, match="newer HERMES"):
         ops.restore(root, tmp_path / "b.hbk", PASS)
     assert snapshot(root) == before
+
+
+def test_verify_backup_accepts_good_and_rejects_bad_without_leftovers(tmp_path):
+    root = make_root(tmp_path)
+    (tmp_path / "out").mkdir()
+    good = ops.backup(root, tmp_path / "out" / "g.hbk", PASS)
+    ops.verify_backup(good, PASS)
+    with pytest.raises(ops.OpsError, match="wrong passphrase"):
+        ops.verify_backup(good, "another long passphrase")
+    bad = craft(tmp_path / "out" / "b.hbk", {"x.json": b"{}"}, meta={"version": 2, "files": {}})
+    with pytest.raises(ops.OpsError):
+        ops.verify_backup(bad, PASS)
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["b.hbk", "g.hbk"]  # staging removed, root untouched

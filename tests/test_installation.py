@@ -81,3 +81,13 @@ def test_systemd_hardening_and_credentials():
         path = ROOT / "deploy" / script
         assert path.stat().st_mode & 0o111, script
         assert subprocess.run(["sh", "-n", str(path)]).returncode == 0  # noqa: S603, S607
+
+
+def test_backup_unit_can_stop_the_app_it_must_lock_out():
+    """Regression: the CLI backup refuses while hermes holds the data-root lock, and User=hermes cannot stop it."""
+    svc = (ROOT / "deploy/hermes-backup.service").read_text()
+    sh = (ROOT / "deploy/hermes-backup.sh").read_text()
+    assert "User=hermes" not in svc and "systemctl stop hermes" in sh
+    assert sh.index("systemctl stop hermes") < sh.index("ops backup") < sh.index("ops verify-backup")
+    assert "trap on_exit EXIT" in sh and "systemctl start hermes" in sh
+    assert "exclusive=True" in (ROOT / "app/ops.py").read_text()

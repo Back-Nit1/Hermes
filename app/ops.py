@@ -3,6 +3,7 @@
   python -m app.ops migrate                     apply pending SQLite + JSON migrations (backs up first)
   python -m app.ops check-schemas               validate templates and every campaign's JSON files
   python -m app.ops backup FILE                 encrypted snapshot of the whole data root (app must be stopped; FILE outside it)
+  python -m app.ops verify-backup FILE          decrypt and fully verify a backup without touching the data root
   python -m app.ops restore FILE                replace the data root with a backup (old root kept aside)
   python -m app.ops purge [--days N] [--campaigns-older-than N]
   python -m app.ops forget (--email ADDR | --name "Full Name")   delete a person from every campaign
@@ -336,6 +337,16 @@ def restore(data_root, inp, passphrase):
     return aside
 
 
+def verify_backup(inp, passphrase):
+    """Decrypt to a private staging dir and run the same checks restore trusts. Never touches the data root."""
+    staging = Path(tempfile.mkdtemp(prefix=".hermes-verify-", dir=Path(inp).resolve().parent))
+    try:
+        _extract(inp, passphrase, staging)
+        _verify(staging)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- retention / deletion
 def purge(data_root, days, campaigns_older_than=None):
     totals = {}
@@ -434,7 +445,7 @@ def main(argv=None):
     sub.add_parser("check-schemas")
     sub.add_parser("gen-secret-key")
     sub.add_parser("user-list")
-    for name in ("backup", "restore"):
+    for name in ("backup", "restore", "verify-backup"):
         sub.add_parser(name).add_argument("file")
     p = sub.add_parser("purge")
     p.add_argument("--days", type=int, default=None)
@@ -467,6 +478,10 @@ def main(argv=None):
             pw = _secret("HERMES_BACKUP_PASSPHRASE", "Backup passphrase: ", confirm=True)
             out = backup(root, a.file, pw, exclusive=True)
             print(f"wrote {out} ({out.stat().st_size} bytes). Keep the passphrase separately; it cannot be recovered.")
+            return 0
+        if a.cmd == "verify-backup":
+            verify_backup(a.file, _secret("HERMES_BACKUP_PASSPHRASE", "Backup passphrase: "))
+            print(f"verified {a.file}")
             return 0
         if a.cmd == "restore":
             aside = restore(root, a.file, _secret("HERMES_BACKUP_PASSPHRASE", "Backup passphrase: "))
