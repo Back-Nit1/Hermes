@@ -57,11 +57,38 @@ settings. Examples of what gets rejected:
 | Endpoint | Auth | Returns |
 |---|---|---|
 | `GET /healthz` | none | `{"status":"ok"}` while the process serves requests |
-| `GET /readyz` | none | 200 when the data root is writable, the database answers, and job workers are alive; otherwise 503 with the failing check names |
+| `GET /readyz` | none | 200 when the data root is writable, the database answers, and job workers are alive; otherwise 503 with the failing check names. In remote mode it also checks every user service that has been initialized (`user_databases`, `user_workers`) and reports only counts (`user_services`: initialized, `bad_db`, `dead_workers`), never whose service it is |
 | `GET /api/diagnostics` | token / session | version, mode, schema versions, job counts by status, queue depths, worker state, whether Gmail is connected, model name |
+| `GET /api/metrics` | token / session | see below |
 
-None of these return keys, tokens, email addresses, names, or draft text. In remote mode, diagnostics only cover the
-calling user's own data.
+None of these return keys, tokens, email addresses, names, or draft text. In remote mode, diagnostics and metrics
+queues only cover the calling user's own service.
+
+### Metrics
+
+`GET /api/metrics` returns JSON with numbers and the fixed lane names `research` and `write` only; no label ever comes
+from user or campaign data. There is no Prometheus endpoint; scrape this JSON (it needs the app token or a session)
+if you want it in a dashboard.
+
+| Field | Meaning |
+|---|---|
+| `queues.<lane>.depth`, `oldest_age_s` | jobs waiting and how long the oldest has waited. Rising `oldest_age_s` with `workers_alive: true` means the lane is saturated; raise `HERMES_RESEARCH_WORKERS` only if the provider has headroom |
+| `provider` | OpenAI and Gmail calls since process start: `count`, p50/p95/max latency over the last 500 calls (ms), and `retries` (OpenAI re-attempts after 429/5xx/network errors) |
+| `sqlite` | latency of every cache database call, including time spent waiting for the single connection lock. High p95 means contention |
+| `uncertain_sends` / `uncertain_pending` | sends whose outcome was unknown since process start / right now. Pending ones are reconciled, never resent; investigate if the number stays above 0 |
+| `gmail_sync_age_s` | seconds since the last successful background or manual Gmail sync (`null` before the first one or without Gmail) |
+| `disk` | total/free bytes and percent used on the data volume |
+| `backup_age_s` | age of the newest completed `*.hbk` in `HERMES_BACKUP_DIR` (`null` when that is unset). It is the age of the file, not proof that it restores; run `restore` drills as described in the backup section. `backup_verified_age_s` is always `null` until restore verification exists |
+
+Latencies, counts and retries are process-wide (all users in remote mode) and reset on restart.
+
+### Capacity settings
+
+`HERMES_RESEARCH_WORKERS` (default 2) and `HERMES_JOB_QUEUE_SIZE` (default 512 per lane) are the only worker and queue
+knobs; the writer is always one worker. 512 comes from `test_load` (3 campaigns x 100 people queued at once); a
+queue smaller than the largest batch you start makes the extra requests fail with a "saturated" error.
+`HERMES_GMAIL_SYNC_INTERVAL_SECONDS` (default 300) sets the Gmail reply-sync loop. The old `GMAIL_SYNC_MINUTES`
+variable is no longer read.
 
 ## Logs
 
