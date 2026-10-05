@@ -16,6 +16,7 @@ local app token is never read, written, or accepted in this mode.
 import contextvars
 import fcntl
 import logging
+import math
 import os
 import re
 import secrets
@@ -296,9 +297,15 @@ def create_app(service=None, token=None, config=None):
             raise HTTPException(404)
         if "application/json" not in request.headers.get("content-type", ""):
             raise HTTPException(415, "JSON body required")
-        res = state["accounts"].login(str(body.get("username", "")), str(body.get("password", "")))
+        # request.client is the peer, or the real client once uvicorn has accepted X-Forwarded-For from a
+        # peer in HERMES_TRUSTED_PROXIES; never read the header here, so an untrusted peer cannot spoof it.
+        source = request.client.host if request.client else None
+        username = str(body.get("username", ""))
+        res = state["accounts"].login(username, str(body.get("password", "")), source)
         if not res:
-            return JSONResponse({"detail": "wrong username or password, or too many attempts"}, 401)
+            wait = state["accounts"].login_status(username, source)["retry_after"]
+            headers = {"Retry-After": str(max(1, math.ceil(wait)))} if wait else None
+            return JSONResponse({"detail": "wrong username or password, or too many attempts"}, 401, headers=headers)
         tok, csrf, _ = res
         resp = JSONResponse({"mode": "remote", "user": body["username"], "csrf": csrf})
         resp.set_cookie(SESSION_COOKIE, tok, httponly=True, secure=True, samesite="strict", path="/", max_age=7 * 86400)

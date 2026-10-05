@@ -122,6 +122,18 @@ def test_lockout_and_disabled_users(remote):
     assert c.get("/api/campaigns").status_code == 401
 
 
+def test_login_throttles_by_client_source_and_sets_retry_after(remote, monkeypatch):
+    from app import auth
+
+    app, cfg, anon, _ = remote
+    monkeypatch.setattr(auth, "SOURCE_MAX_FAILURES", 3)
+    for name in ("u1", "u2", "u3"):  # distinct accounts: only the shared source can lock this out
+        r = anon.post("/auth/login", json={"username": name, "password": "nope-nope-nope"})
+    assert int(r.headers["retry-after"]) > 0
+    r = anon.post("/auth/login", json={"username": "alice", "password": PW["alice"]})
+    assert r.status_code == 401 and int(r.headers["retry-after"]) > 0
+
+
 def test_users_are_isolated(remote):
     app, cfg, anon, _ = remote
     alice, bob = login(anon, "alice"), login(anon, "bob")
