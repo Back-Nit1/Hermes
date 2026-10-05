@@ -97,7 +97,7 @@ def build_service(cfg, data_root=None, openai_key=None, gmail=None):
             "oauth",
             f"{gmail_error}; run `python -m app.gmail` to reconnect",
         )
-    svc = CampaignService(store, cache, model, fetcher, gmail, Workspace(cache, data_root))
+    svc = CampaignService(store, cache, model, fetcher, gmail, Workspace(cache, data_root), config=cfg)
     svc.outreach.gmail_error = gmail_error
     return svc
 

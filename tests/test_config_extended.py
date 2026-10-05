@@ -73,3 +73,16 @@ def test_write_probe_is_unique_and_cleaned(tmp_path):
     cfg(tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == [".write-probe"]
     assert (tmp_path / ".write-probe").read_text() == "precious"
+
+
+@pytest.mark.parametrize("name", ["HERMES_RESEARCH_WORKERS", "HERMES_JOB_QUEUE_SIZE"])
+@pytest.mark.parametrize("v", ["0", "-1", "x", "nan", "999999"])
+def test_capacity_settings_rejected(tmp_path, name, v):
+    bad(tmp_path, name, **{name: v})
+
+
+def test_capacity_defaults_preserve_load_tested_queue(tmp_path):
+    c = cfg(tmp_path, HERMES_RESEARCH_WORKERS="4", HERMES_JOB_QUEUE_SIZE="64")
+    assert (c.research_workers, c.job_queue_size) == (4, 64)
+    d = cfg(tmp_path)
+    assert (d.research_workers, d.job_queue_size) == (2, 512)

@@ -9,13 +9,13 @@ import hashlib
 import inspect
 import json
 import logging
-import os
 import re
 import shutil
 import time
 from datetime import UTC, datetime
 
 from . import analytics, csvio, outlines, research, writer
+from .config import Config
 from .contracts import EMAIL_RE, INTAKE_FIELDS, clean_intake, dedupe_key, normalize_url
 from .followups import Outreach
 from .gmail import GmailAuthError
@@ -162,7 +162,10 @@ def essential_missing(intake):
 
 
 class CampaignService:
-    def __init__(self, store, cache, model, fetcher, gmail=None, workspace=None, clock=time.time, send_every=15):
+    def __init__(
+        self, store, cache, model, fetcher, gmail=None, workspace=None, clock=time.time, send_every=15, config=None
+    ):
+        cfg = config or Config()
         self.store, self.cache, self.model, self.fetcher, self.gmail = store, cache, model, fetcher, gmail
         self.workspace = workspace
         self.ledger = Ledger(cache)
@@ -176,6 +179,8 @@ class CampaignService:
                 "write": self._do_write,
                 "followup": self.outreach.generate,
             },
+            research_workers=cfg.research_workers,
+            queue_size=cfg.job_queue_size,
         )
         self.jobs.on_finish = self._job_finished
         self.outbox = Outbox(cache, gmail, clock)
@@ -183,6 +188,7 @@ class CampaignService:
         self.outbox.materialize = self._send_attachments
         self.outbox.on_delivery = self._record_delivery
         self.outbox.on_outcome = self._outbound_outcome
+        self.gmail_sync_interval = cfg.gmail_sync_interval
         self.send_every = send_every  # None lets tests drive the scheduler explicitly
 
     async def parse_intake(self, text, mode=None, subtype=None):
@@ -240,9 +246,9 @@ class CampaignService:
         self.outreach.reset_interrupted()
         self.outbox.recover()
         self.jobs.start()
-        minutes = float(os.environ.get("GMAIL_SYNC_MINUTES", 15))
-        if minutes > 0:
-            self.jobs.tasks.append(asyncio.create_task(self._sync_loop(minutes)))  # cancelled with the workers
+        self.jobs.tasks.append(
+            asyncio.create_task(self._sync_loop(self.gmail_sync_interval))
+        )  # cancelled with the workers
         if self.send_every:
             self.jobs.tasks.append(asyncio.create_task(self._send_loop()))  # cancelled with the workers on shutdown
 
@@ -254,9 +260,9 @@ class CampaignService:
             except Exception:
                 logging.getLogger("sending").exception("scheduler tick failed")
 
-    async def _sync_loop(self, minutes):
+    async def _sync_loop(self, seconds):
         while True:
-            await asyncio.sleep(minutes * 60)
+            await asyncio.sleep(seconds)
             try:
                 await self.sync_now()
             except Exception:
