@@ -78,9 +78,34 @@ Follow these steps in order:
    sudo systemctl daemon-reload && sudo systemctl enable --now hermes-backup.timer
    ```
 
-   It keeps the newest 14 files (`BACKUP_KEEP`). Copy `/var/backups/hermes` off the machine. To restore, run
-   `sudo deploy/hermes-restore.sh /var/backups/hermes/<file>.hbk`: it stops the service, restores, restarts, and waits
-   for `/readyz`. Rehearse a restore on a scratch VM before you need it. See [operations.md](operations.md).
+   The timer runs `deploy/hermes-backup.sh` as root (the only way to stop a unit; it drops to the `hermes` user for
+   every data access). Each run: gracefully stops `hermes` (releasing the data-root lock, jobs checkpointed), takes the
+   exclusive encrypted backup, runs `ops verify-backup` on the file (decrypt, hashes, SQLite integrity), prunes, and
+   **always** starts `hermes` again and waits up to 60 s for `/readyz`. A failed or unverifiable backup is deleted and
+   the unit fails; a failed restart or readiness check also fails the unit. If `hermes` was already stopped, it is left
+   stopped. Backup files are `0600`, owned by `hermes`, in a `0700` directory.
+
+   - **Downtime:** expect HERMES to be unavailable for the stop grace period (up to `TimeoutStopSec`, 60 s), the
+     backup and verification time (roughly proportional to data size; seconds for small data roots), and startup.
+     In-flight jobs are checkpointed and resume. The timer fires 03:15 plus up to 15 min random delay; adjust
+     `OnCalendar` to your quiet hours.
+   - **Monitoring:** alert on the unit, not on the log. `systemctl is-failed hermes-backup.service` (or
+     `systemctl list-units --failed`) must be clean; check `systemctl list-timers hermes-backup.timer` shows a recent
+     `LAST` and a future `NEXT`; alert when the newest `*.hbk` in `/var/backups/hermes` is older than ~26 h; and probe
+     `/readyz` externally. `journalctl -u hermes-backup` shows `backup ok: <file>` or `FAILED: ...`.
+   - **Retention:** the newest 14 verified files (`BACKUP_KEEP`) are kept locally; pruning happens only after a new
+     backup verified, so failures never shrink the set. Set a longer off-machine retention to match your recovery needs
+     and your deletion obligations (old backups keep deleted data until they expire).
+   - **Off-machine replication is NOT automatic.** Nothing here copies backups elsewhere. A backup on the same disk is
+     not a disaster-recovery copy. Add a separate job (for example `rclone copy /var/backups/hermes remote:hermes`
+     or `rsync` to another host, run after the timer) with its own failure alerting; files are encrypted, so ordinary
+     object storage is fine. Store the passphrase and `HERMES_SECRET_KEY` separately from the backups.
+   - **Restore drill (do it quarterly, and after any backup change):** copy a recent `.hbk` (preferably from the
+     off-machine copy) and the passphrase to a scratch VM with the same app version, then
+     `sudo deploy/hermes-restore.sh <file>.hbk`, confirm `/readyz`, log in, and open a campaign. The script stops the
+     service, restores (old root kept as `<root>.pre-restore-*`), restarts, and waits for `/readyz`.
+     Check `python -m app.ops verify-backup <file>` also passes without touching any data root.
+     See [operations.md](operations.md).
 
 7. **Upgrades:** take a backup, `git pull`, reinstall from the lock, then `systemctl restart hermes`. Migrations run
    at startup and make their own `.bak` copies first.

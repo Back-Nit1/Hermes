@@ -123,6 +123,7 @@ one before every upgrade.
 
 ```bash
 python -m app.ops backup /secure/place/hermes-2026-09-26.hbk     # app must be stopped; prompts for a passphrase (or HERMES_BACKUP_PASSPHRASE)
+python -m app.ops verify-backup /secure/place/hermes-2026-09-26.hbk   # decrypt + full verification, touches no data root
 python -m app.ops restore /secure/place/hermes-2026-09-26.hbk    # app must be stopped
 ```
 
@@ -168,6 +169,10 @@ python -m app.ops restore /secure/place/hermes-2026-09-26.hbk    # app must be s
   extra files or newer schemas, and a full CLI backup, wipe, restore drill that reopens the restored data.
   `tests/test_ops.py` also takes a backup, deletes and edits data, and checks that a restore reproduces every file
   and SQLite row.
+
+The production nightly lifecycle (stop, backup, verify, always restart) is `deploy/hermes-backup.sh`; see
+[remote-deployment.md](remote-deployment.md) for downtime, monitoring, retention, and off-machine copies. It is
+covered by `tests/test_backup_script.py` (fake systemctl/setpriv, including failure paths that must still restart).
 
 Take a restore drill (restore into a scratch `DATA_ROOT`) after any change to how you back up. Keep backups outside
 the machine. Encryption makes them safe to store in ordinary cloud storage.
