@@ -300,6 +300,20 @@ def test_timeout_after_gmail_accepted_is_reconciled_not_resent(world):
     assert "uncertain" in events(svc, row["send_id"]) and events(svc, row["send_id"])[-1] == "sent"
 
 
+def test_uncertain_sends_are_counted_in_metrics(world):
+    from app.operational_metrics import metrics
+
+    svc, fake, clock, cid, _ = world
+    cand = add_person(svc, cid, 1)
+    enable(svc, cid)
+    schedule(svc, cid, cand)
+    before = metrics.uncertain_sends
+    fake.send_mode = "timeout_after"
+    svc.outbox.tick()
+    assert metrics.uncertain_sends == before + 1
+    assert svc.metrics_snapshot()["uncertain_pending"] == 1
+
+
 def test_timeout_before_gmail_accepted_retries_exactly_once(world):
     svc, fake, clock, cid, _ = world
     cand = add_person(svc, cid, 1)

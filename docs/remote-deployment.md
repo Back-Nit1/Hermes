@@ -153,7 +153,7 @@ pages (outbound), and operator shell access to the server.
 | Threat | Mitigation |
 |---|---|
 | Network eavesdropping or tampering | TLS at Caddy, HSTS, Secure cookies, app reachable only on loopback |
-| Password guessing | scrypt, 12-character minimum, per-username lockout, no self-signup |
+| Password guessing | scrypt, 12-character minimum, per-username, per-client-address and global lockout (failed logins during a lockout carry `Retry-After`), no self-signup. The client address is the proxy-resolved peer: it is only correct when `HERMES_TRUSTED_PROXIES` lists exactly the proxy in front of the app (default `127.0.0.1`, which matches Caddy on the same host). Avoid `*`, which lets any peer choose its own address |
 | Session theft through XSS | HttpOnly cookie, strict CSP, all rendered text escaped, web page text handled as untrusted data |
 | Cross-site request forgery | SameSite=Strict, per-session CSRF header, Origin check, JSON-only login |
 | One user reading or changing another's data | per-user data roots and services chosen by session only; isolation tests on every route |

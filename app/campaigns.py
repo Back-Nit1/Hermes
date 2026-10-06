@@ -9,19 +9,20 @@ import hashlib
 import inspect
 import json
 import logging
-import os
 import re
 import shutil
 import time
 from datetime import UTC, datetime
 
 from . import analytics, csvio, outlines, research, writer
+from .config import Config
 from .contracts import EMAIL_RE, INTAKE_FIELDS, clean_intake, dedupe_key, normalize_url
 from .followups import Outreach
 from .gmail import GmailAuthError
 from .jobs import Coordinator
 from .ledger import MANUAL_INTERACTIONS, Ledger, clean_tags
 from .openai_client import BudgetExceeded, ModelError
+from .operational_metrics import metrics
 from .ranking import clean_weights, score_candidate
 from .sending import Outbox, payload_hash
 from .storage import now_iso
@@ -162,7 +163,10 @@ def essential_missing(intake):
 
 
 class CampaignService:
-    def __init__(self, store, cache, model, fetcher, gmail=None, workspace=None, clock=time.time, send_every=15):
+    def __init__(
+        self, store, cache, model, fetcher, gmail=None, workspace=None, clock=time.time, send_every=15, config=None
+    ):
+        cfg = config or Config()
         self.store, self.cache, self.model, self.fetcher, self.gmail = store, cache, model, fetcher, gmail
         self.workspace = workspace
         self.ledger = Ledger(cache)
@@ -176,6 +180,8 @@ class CampaignService:
                 "write": self._do_write,
                 "followup": self.outreach.generate,
             },
+            research_workers=cfg.research_workers,
+            queue_size=cfg.job_queue_size,
         )
         self.jobs.on_finish = self._job_finished
         self.outbox = Outbox(cache, gmail, clock)
@@ -183,6 +189,9 @@ class CampaignService:
         self.outbox.materialize = self._send_attachments
         self.outbox.on_delivery = self._record_delivery
         self.outbox.on_outcome = self._outbound_outcome
+        self.gmail_sync_interval = cfg.gmail_sync_interval
+        self.last_gmail_sync = None  # epoch seconds of the last successful sync, for metrics
+        self.backup_dir = cfg.backup_dir
         self.send_every = send_every  # None lets tests drive the scheduler explicitly
 
     async def parse_intake(self, text, mode=None, subtype=None):
@@ -240,9 +249,9 @@ class CampaignService:
         self.outreach.reset_interrupted()
         self.outbox.recover()
         self.jobs.start()
-        minutes = float(os.environ.get("GMAIL_SYNC_MINUTES", 15))
-        if minutes > 0:
-            self.jobs.tasks.append(asyncio.create_task(self._sync_loop(minutes)))  # cancelled with the workers
+        self.jobs.tasks.append(
+            asyncio.create_task(self._sync_loop(self.gmail_sync_interval))
+        )  # cancelled with the workers
         if self.send_every:
             self.jobs.tasks.append(asyncio.create_task(self._send_loop()))  # cancelled with the workers on shutdown
 
@@ -254,9 +263,9 @@ class CampaignService:
             except Exception:
                 logging.getLogger("sending").exception("scheduler tick failed")
 
-    async def _sync_loop(self, minutes):
+    async def _sync_loop(self, seconds):
         while True:
-            await asyncio.sleep(minutes * 60)
+            await asyncio.sleep(seconds)
             try:
                 await self.sync_now()
             except Exception:
@@ -268,6 +277,7 @@ class CampaignService:
             self._require(campaign_id)
         res = await asyncio.to_thread(self.outreach.sync, campaign_id)
         res["followups_queued"] = self.outreach.tick()
+        self.last_gmail_sync = time.time()
         return res
 
     def _link_all(self, campaign_id):
@@ -2010,6 +2020,25 @@ class CampaignService:
             "workers_alive": self.jobs.alive(),
             "running_jobs": self.jobs.running,
         }
+
+    def metrics_snapshot(self):
+        """Redacted operational metrics: numbers and fixed lane names only (see operational_metrics)."""
+        newest = None
+        if self.backup_dir:
+            try:
+                newest = max((p.stat().st_mtime for p in self.backup_dir.glob("*.hbk")), default=None)
+            except OSError:
+                pass
+        snap = metrics.snapshot(
+            queues=self.jobs.queue_times(),
+            gmail_last_sync=self.last_gmail_sync if self.gmail else None,
+            data_root=self.store.root,
+            backup_written_at=newest,
+        )
+        snap.pop("services")  # process-wide names are not meaningful per service; /readyz reports counts
+        snap["uncertain_pending"] = len(self.outbox._rows("status='uncertain'"))
+        snap["workers_alive"] = self.jobs.alive()
+        return snap
 
     # ---------------------------------------------------------------- control
     def stop(self, campaign_id):

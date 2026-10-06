@@ -30,6 +30,7 @@ class Coordinator:
         self.handlers = handlers  # kind -> async fn(campaign_id, candidate_id)
         self.queues = {"research": asyncio.Queue(queue_size), "write": asyncio.Queue(queue_size)}
         self.workers = {"research": research_workers, "write": 1}
+        self.queued_at = {}  # job_id -> enqueue epoch seconds, only while waiting in a queue
         self.stopped = set()
         self.on_finish = None  # optional fn(job_id, campaign_id, kind, status, error) for notifications
         self.tasks = []
@@ -51,11 +52,19 @@ class Coordinator:
             t.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks = []
+        self.queued_at.clear()
         self.cache.mark_interrupted()  # checkpoint: queued/running rows become resumable
         log.info("job workers stopped", extra={"status": "interrupted" if self.running else "drained"})
 
     def depths(self):
         return {lane: q.qsize() for lane, q in self.queues.items()}
+
+    def queue_times(self):
+        """{lane: [enqueue epoch seconds, ...]} for jobs still waiting, for queue-age metrics."""
+        times = {lane: [] for lane in self.queues}
+        for lane, at in list(self.queued_at.values()):
+            times[lane].append(at)
+        return times
 
     def alive(self):
         return bool(self.tasks) and not any(t.done() for t in self.tasks)
@@ -98,12 +107,14 @@ class Coordinator:
         # cannot change between this check, the durable row, and put_nowait.
         self.cache.put_job(job_id, campaign_id, kind, candidate_id, "queued")
         q.put_nowait(item)
+        self.queued_at[job_id] = (self.lane(kind), time.time())
         self.stopped.discard(campaign_id)
 
     async def _run(self, lane):
         q = self.queues[lane]
         while True:
             job_id, campaign_id, kind, candidate_id, req = await q.get()
+            self.queued_at.pop(job_id, None)
             job_ctx.set(job_id)
             request_ctx.set(req)
             extra = {"campaign_id": campaign_id, "kind": kind}

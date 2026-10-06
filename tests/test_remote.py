@@ -1,6 +1,7 @@
 """Remote mode: accounts, sessions, CSRF, HTTPS, and strict per-user isolation."""
 
 import sqlite3
+import time
 
 import pytest
 from cryptography.fernet import Fernet
@@ -120,6 +121,37 @@ def test_lockout_and_disabled_users(remote):
     acc.set_disabled("alice")
     acc.close()
     assert c.get("/api/campaigns").status_code == 401
+
+
+def test_login_throttles_by_client_source_and_sets_retry_after(remote, monkeypatch):
+    from app import auth
+
+    app, cfg, anon, _ = remote
+    monkeypatch.setattr(auth, "SOURCE_MAX_FAILURES", 3)
+    for name in ("u1", "u2", "u3"):  # distinct accounts: only the shared source can lock this out
+        r = anon.post("/auth/login", json={"username": name, "password": "nope-nope-nope"})
+    assert int(r.headers["retry-after"]) > 0
+    r = anon.post("/auth/login", json={"username": "alice", "password": PW["alice"]})
+    assert r.status_code == 401 and int(r.headers["retry-after"]) > 0
+
+
+def test_readyz_exposes_dead_user_workers_without_identifying_anyone(remote):
+    app, cfg, anon, _ = remote
+    alice = login(anon, "alice")
+    assert alice.get("/api/status").status_code == 200  # initializes alice's service
+    ok = anon.get("/readyz")
+    assert ok.status_code == 200 and ok.json()["user_services"] == {"initialized": 1, "bad_db": 0, "dead_workers": 0}
+    (svc,) = app.state.runtime["services"].values()
+    for t in svc.jobs.tasks:
+        t.cancel()
+    time.sleep(0.1)
+    r = anon.get("/readyz")
+    assert r.status_code == 503 and r.json()["checks"]["user_workers"] is False
+    assert r.json()["user_services"]["dead_workers"] == 1
+    assert "alice" not in r.text
+    svc.cache.ping = lambda: 1 / 0  # a failing database is visible too
+    r = anon.get("/readyz")
+    assert r.json()["checks"]["user_databases"] is False and "alice" not in r.text
 
 
 def test_users_are_isolated(remote):

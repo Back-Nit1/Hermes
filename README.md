@@ -143,7 +143,10 @@ intake → discovery → candidate review → research → evidence review → o
   intake happens before campaign creation and never triggers web search. The intake screen
   shows the projection; the budget (default 60) is enforced and shown live. Cache hits are counted separately.
 - Web search tool calls are billed per call on top of tokens; check current OpenAI pricing for your model.
-- Concurrency: 2 research tasks, 1 writer, queues of 16. At most 2 documents are fetched per person. HTML/text responses
+- Concurrency: 2 research tasks (`HERMES_RESEARCH_WORKERS`, 1-16), 1 writer, and one queue per lane of 512 jobs
+  (`HERMES_JOB_QUEUE_SIZE`). 512 is the load-tested capacity: `test_load` queues 3 campaigns x 100 people at once, so a
+  smaller queue rejects work with "saturated". The writer is fixed at 1. Gmail reply sync runs every
+  `HERMES_GMAIL_SYNC_INTERVAL_SECONDS` (default 300). At most 2 documents are fetched per person. HTML/text responses
   are capped at 800 KB; PDFs at 5 MB and 12 pages; extracted text at 6,000 characters; each request times out after
   12 seconds. Usage reports API calls, tokens, cache hits, documents fetched, bytes downloaded, and URLs skipped by the
   per-person cap. Limits are enforced before content reaches the model.

@@ -66,6 +66,9 @@ class Config:
     shutdown_grace: float = 10.0
     gmail_sync_interval: float = 300.0
     gmail_timeout: float = 30.0
+    backup_dir: Path | None = None  # where the backup timer writes *.hbk; only used to report backup age
+    research_workers: int = 2
+    job_queue_size: int = 512  # per lane; load-tested capacity, see docs/operations.md
     price_input_per_mtok: float | None = None
     price_output_per_mtok: float | None = None
 
@@ -130,6 +133,11 @@ def load_config(env=None):
     grace = num("SHUTDOWN_GRACE_SECONDS", 10, float, 0, 300)
     gmail_sync = num("HERMES_GMAIL_SYNC_INTERVAL_SECONDS", 300, float, 10, 86400)
     gmail_timeout = num("HERMES_GMAIL_TIMEOUT_SECONDS", 30, float, 1, 300)
+    research_workers = num("HERMES_RESEARCH_WORKERS", 2, int, 1, 16)
+    job_queue_size = num("HERMES_JOB_QUEUE_SIZE", 512, int, 1, 10000)
+    backup_dir = Path(os.path.expanduser(env["HERMES_BACKUP_DIR"].strip())) if env.get("HERMES_BACKUP_DIR") else None
+    if backup_dir and not backup_dir.is_absolute():
+        problems.append("HERMES_BACKUP_DIR must be an absolute path")
     prices = {}
     for name in ("HERMES_PRICE_INPUT_PER_MTOK", "HERMES_PRICE_OUTPUT_PER_MTOK"):
         if env.get(name):
@@ -191,6 +199,9 @@ def load_config(env=None):
         shutdown_grace=grace,
         gmail_sync_interval=gmail_sync,
         gmail_timeout=gmail_timeout,
+        backup_dir=backup_dir,
+        research_workers=research_workers,
+        job_queue_size=job_queue_size,
         price_input_per_mtok=prices.get("HERMES_PRICE_INPUT_PER_MTOK"),
         price_output_per_mtok=prices.get("HERMES_PRICE_OUTPUT_PER_MTOK"),
     )
