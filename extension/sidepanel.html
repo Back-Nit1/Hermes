@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HERMES Capture</title>
+  <link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">H</span> HERMES</div>
+      <button id="open-settings" class="icon-button" type="button" aria-label="Connection settings">Settings</button>
+    </header>
+
+    <main class="content">
+      <div id="live-region" class="sr-only" aria-live="polite"></div>
+      <section id="connection" class="status" data-state="unpaired" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div><strong id="connection-title">Checking connection…</strong><p id="connection-detail"></p></div>
+      </section>
+
+      <section id="overview-view" class="view">
+        <div class="hero"><p class="eyebrow">Research inbox</p><h1>Bring useful context into focus.</h1><p class="muted">Capture only what you choose, inspect it, then add it to a campaign.</p></div>
+        <div class="cards" aria-label="HERMES summary">
+          <div class="metric"><b id="notification-count">—</b><span>Notifications</span></div>
+          <div class="metric"><b id="review-count">—</b><span>Need review</span></div>
+          <div class="metric"><b id="followup-count">—</b><span>Due today</span></div>
+        </div>
+        <div class="button-row">
+          <button id="capture-selection" class="primary" type="button">Capture selection</button>
+          <button id="capture-page" class="secondary" type="button">Capture page details</button>
+        </div>
+        <section class="section">
+          <div class="section-head"><h2>Attention queue</h2><button class="icon-button" data-deep-link="approval" type="button">Open all</button></div>
+          <div id="attention-list" class="list"></div>
+        </section>
+      </section>
+
+      <section id="capture-view" class="view" hidden>
+        <p class="eyebrow">Preview before commit</p><h1>Check this capture.</h1>
+        <div id="capture-empty" class="empty">Choose “Capture selection” or “Capture page details” to begin.</div>
+        <div id="capture-preview" class="capture-card" hidden>
+          <dl><dt>Page</dt><dd id="capture-title"></dd><dt>Address</dt><dd id="capture-url"></dd><dt>Included</dt><dd id="capture-kind"></dd></dl>
+          <div id="capture-excerpt" class="excerpt" hidden></div>
+          <div id="capture-warnings" class="list section"></div>
+          <label for="campaign-select">Campaign<select id="campaign-select"></select></label>
+          <div class="button-row"><button id="discard-capture" class="quiet" type="button">Discard</button><button id="commit-capture" class="primary" type="button">Add to campaign</button></div>
+        </div>
+      </section>
+
+      <section id="queue-view" class="view" hidden>
+        <p class="eyebrow">Human checkpoints</p><h1>Review & follow up.</h1>
+        <section><div class="section-head"><h2>Review queue</h2><button class="icon-button" data-deep-link="approval" type="button">Dashboard</button></div><div id="review-list" class="list"></div></section>
+        <section class="section"><div class="section-head"><h2>Follow-ups due</h2><button class="icon-button" data-deep-link="scheduling" type="button">Schedule</button></div><div id="followup-list" class="list"></div></section>
+        <section class="section"><p class="eyebrow">Full dashboard actions</p><div class="button-row"><button class="quiet" data-deep-link="gmail" type="button">Create in Gmail</button><button class="quiet" data-deep-link="sending" type="button">Sending</button><button class="quiet" data-deep-link="settings" type="button">Settings</button><button class="danger button" data-deep-link="deletion" type="button">Deletion</button></div></section>
+      </section>
+    </main>
+
+    <nav class="tabs" aria-label="Extension sections">
+      <button type="button" data-view="overview" aria-selected="true">Overview</button>
+      <button type="button" data-view="capture" aria-selected="false">Capture</button>
+      <button type="button" data-view="queue" aria-selected="false">Queue</button>
+    </nav>
+  </div>
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

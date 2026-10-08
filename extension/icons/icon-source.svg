@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="HERMES H mark">
+  <rect width="128" height="128" rx="28" fill="#204d3b"/>
+  <path d="M31 29h16v27h34V29h16v70H81V71H47v28H31z" fill="#fffdf7"/>
+  <circle cx="98" cy="28" r="10" fill="#cc5a32"/>
+</svg>

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HERMES connection</title><link rel="stylesheet" href="shared/styles.css"></head>
+<body>
+  <main class="options-shell">
+    <div id="live-region" class="sr-only" aria-live="polite"></div>
+    <p class="eyebrow">HERMES Capture</p><h1>Connect this browser.</h1><p class="muted">A pairing code is used once. The resulting device token stays in Chrome local storage and can be revoked here or in HERMES.</p>
+    <section class="options-card">
+      <div id="connection" class="status" data-state="unpaired"><span class="status-dot" aria-hidden="true"></span><div><strong id="connection-title">Not paired</strong><p id="connection-detail">Enter a one-time code from HERMES Settings.</p></div></div>
+      <form id="connection-form">
+        <label class="choice"><input id="mock-mode" name="mockMode" type="checkbox"><div>Use demo transport<span>Explore every extension screen without a running backend. Data stays in extension storage.</span></div></label>
+        <label for="base-url">HERMES address<input id="base-url" name="baseUrl" type="url" required placeholder="http://127.0.0.1:8000"></label>
+        <label for="pairing-code">One-time pairing code<input id="pairing-code" name="pairingCode" type="text" autocomplete="one-time-code" spellcheck="false" placeholder="HERMES-AB12"></label>
+        <label for="device-name">Device name<input id="device-name" name="deviceName" type="text" maxlength="80" value="Chrome"></label>
+        <div class="form-actions"><button id="pair-button" class="primary" type="submit">Pair device</button><button id="test-button" class="secondary" type="button">Test connection</button><button id="revoke-button" class="danger button" type="button">Revoke this device</button></div>
+      </form>
+      <dl class="connection-meta"><dt>Token storage</dt><dd>Chrome local storage (never synced)</dd><dt>Page access</dt><dd>Only when you invoke capture</dd><dt>Backend access</dt><dd id="permission-origin">Not granted</dd></dl>
+    </section>
+    <section class="section"><h2>Privacy boundaries</h2><p class="muted">HERMES never runs a persistent content script, reads Gmail pages, accesses the clipboard, or uploads a whole page. “Capture page details” includes only the page title, address, description, and any text you selected. Every capture requires a preview and explicit commit.</p></section>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>
