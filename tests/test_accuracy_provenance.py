@@ -151,3 +151,9 @@ def test_manual_correction_must_stay_labelled_unverified():
     assert profile_problems({"candidate_id": "c", "evidence": [{**ev, "web_verified": True}]}) == [
         "manual evidence mislabeled as web verified"
     ]
+
+
+def test_email_on_a_page_about_someone_else_is_not_verified():
+    page = "Grace Hopper, Other College. Contact grace@other.edu and ada@o.edu"
+    d = data(contact_email="ada@o.edu", contact_source_url=URL)
+    assert finalize_profile(CAND, d, {URL}, {URL: page}, strict_grounding=True)["email_verified_on_page"] is False

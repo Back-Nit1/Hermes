@@ -538,6 +538,8 @@ def finalize_profile(
     if email and not EMAIL_RE.fullmatch(email):
         email = None
     verified = bool(email and csrc and csrc in pages and _has_email(email, pages[csrc]))
+    if verified and strict_grounding and not identity_ok(candidate, csrc, pages[csrc]):
+        verified = False  # an address on a page about someone else proves nothing about this person
     if email and not verified:
         # Model said so, page didn't show it: keep it visible but unverified; never promote a guess.
         csrc = csrc if csrc in kinds else None
