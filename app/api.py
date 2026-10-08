@@ -30,7 +30,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, contracts, demo, logs
+from . import analytics, contracts, demo, extension_api, logs
 from . import cache as cache_mod
 from .cache import Cache
 from .campaigns import CampaignService, Rejected
@@ -178,9 +178,10 @@ def create_app(service=None, token=None, config=None):
             return JSONResponse({"detail": "HTTPS required"}, 400)
         unsafe = request.method not in SAFE_METHODS
         origin = request.headers.get("origin")
-        if unsafe and origin and origin != cfg.public_url:
+        ext = path.startswith(extension_api.PREFIX)  # device-token API: its own origin allowlist, never cookies
+        if unsafe and origin and origin != cfg.public_url and not ext:
             return JSONResponse({"detail": "cross-origin request refused"}, 403)
-        request.state.user = state["accounts"].session(request.cookies.get(SESSION_COOKIE))
+        request.state.user = None if ext else state["accounts"].session(request.cookies.get(SESSION_COOKIE))
         needs_session = path.startswith("/api/") or path in ("/auth/logout", "/auth/gmail/start")
         if needs_session and not request.state.user:
             return JSONResponse({"detail": "login required"}, 401)
@@ -254,6 +255,15 @@ def create_app(service=None, token=None, config=None):
         return state["services"][uid]
 
     Svc = Annotated[CampaignService, Depends(current_service)]
+
+    async def service_for(uid):
+        if not cfg.remote:
+            return state["svc"]
+        if uid not in state["services"]:
+            state["services"][uid] = user_service(uid)
+        return state["services"][uid]
+
+    extension_api.register(app, cfg, state, service_for)
 
     # ------------------------------------------------------------ public
     @app.get("/", response_class=HTMLResponse)
