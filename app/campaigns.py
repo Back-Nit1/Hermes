@@ -17,10 +17,10 @@ from datetime import UTC, datetime
 from . import analytics, csvio, outlines, research, writer
 from .config import Config
 from .contracts import EMAIL_RE, INTAKE_FIELDS, clean_intake, dedupe_key, normalize_url
-from .followups import Outreach
+from .followups import OPEN_STEPS, Outreach
 from .gmail import GmailAuthError
 from .jobs import Coordinator
-from .ledger import MANUAL_INTERACTIONS, Ledger, clean_tags
+from .ledger import MANUAL_INTERACTIONS, Ledger, clean_tags, norm_email
 from .openai_client import BudgetExceeded, ModelError
 from .operational_metrics import metrics
 from .ranking import clean_weights, score_candidate
@@ -186,6 +186,11 @@ class CampaignService:
         self.jobs.on_finish = self._job_finished
         self.outbox = Outbox(cache, gmail, clock)
         self.outbox.revalidate = self._send_still_valid
+        self.outbox.dnc_reason = lambda row: self._dnc_reason(row["campaign_id"], row["candidate_id"], row["recipient"])
+        self.dnc_lock = self.outbox.guard
+        for ledger in (self.ledger, getattr(workspace, "ledger", None)):
+            if ledger:
+                self._route_dnc(ledger)
         self.outbox.materialize = self._send_attachments
         self.outbox.on_delivery = self._record_delivery
         self.outbox.on_outcome = self._outbound_outcome
@@ -723,6 +728,7 @@ class CampaignService:
         self.store.update_research(campaign_id, lambda d: d["profiles"].update({candidate_id: profile}))
         self._refresh_rank(campaign_id, candidate_id)
         self.cache.event(campaign_id, f"{candidate_id}: manual correction saved for {field}")
+        self._dnc_resync(campaign_id, candidate_id)
         return {
             "correction": {**row, "original_value": original, "corrected_value": value},
             "detail": self.detail(campaign_id, candidate_id),
@@ -1380,6 +1386,7 @@ class CampaignService:
             lambda: self.cache.upsert_draft(campaign_id, cand, tv, gmail_attempt_at=time.time()),
             (to, d["subject"], d["body"]),
             {"reply_to": ident.get("reply_to") if ident else None, "attachments": attachments},
+            who=(campaign_id, cand),
         )
         ids = res.pop("ids", None)
         if ids:
@@ -1398,8 +1405,10 @@ class CampaignService:
                 res["result"] += " (no verified recipient; add To in Gmail)"
         return res
 
-    async def gmail_create(self, key, attempted, mark_attempt, args, kwargs=None):
-        """Idempotent draft creation: after an attempt with unknown outcome, reconcile by key before retrying."""
+    async def gmail_create(self, key, attempted, mark_attempt, args, kwargs=None, who=None):
+        """Idempotent draft creation: after an attempt with unknown outcome, reconcile by key before retrying.
+
+        who=(campaign_id, candidate_id) rechecks do-not-contact and suppressions under dnc_lock, right before Gmail."""
         if attempted:
             try:
                 found = await asyncio.to_thread(self.gmail.find_by_key, key)
@@ -1407,9 +1416,19 @@ class CampaignService:
                 return {"result": f"uncertain: reconcile failed ({type(e).__name__}); check Gmail Drafts manually"}
             if found:
                 return {"result": "reconciled existing draft", "gmail_draft_id": found["draft_id"], "ids": found}
+
+        def create():
+            with self.dnc_lock:
+                reason = who and self._dnc_reason(*who, args[0])
+                if reason:
+                    raise Rejected(reason)
+                return self.gmail.create(*args, key=key, **(kwargs or {}))
+
         mark_attempt()
         try:
-            ids = await asyncio.to_thread(self.gmail.create, *args, key=key, **(kwargs or {}))
+            ids = await asyncio.to_thread(create)
+        except Rejected as e:
+            return {"result": f"skipped: {e}"}
         except GmailAuthError as e:
             self.outreach.gmail_error = str(e)
             return {"result": f"failed: {e}"}
@@ -1623,6 +1642,183 @@ class CampaignService:
     def _outbound_outcome(self, row, outcome, at):
         self.outreach.set_outcome(row["campaign_id"], row["candidate_id"], outcome, "manual", at=at)
 
+    # ---------------------------------------------------------------- do-not-contact
+    def _route_dnc(self, ledger):
+        """Send every contact write that can change do-not-contact through enforce_dnc.
+
+        Wrapping the instance keeps ledger.py untouched while covering API PATCH, CSV/import, review
+        resolution, campaign DNC, and outcome paths, including calls the ledger makes on itself."""
+        update, create, link, resolve = (
+            ledger.update_contact,
+            ledger.create_contact,
+            ledger.link_candidate,
+            ledger.resolve_review,
+        )
+
+        def update_contact(contact_id, patch):
+            with self.dnc_lock:
+                before = ledger.contact(contact_id)["do_not_contact"]
+                row = update(contact_id, patch)
+                flipped = row["do_not_contact"] != before
+                if flipped or (row["do_not_contact"] and "email" in patch):
+                    self.enforce_dnc(contact_id, transition=flipped)
+                return row
+
+        def after(fn, contact_of):
+            def run(*a, **k):  # not under dnc_lock: fn takes the ledger lock, and upsert_person nests the other way
+                out = fn(*a, **k)
+                contact_id = contact_of(out)
+                if contact_id and ledger.contact(contact_id)["do_not_contact"]:
+                    self.enforce_dnc(contact_id)
+                return out
+
+            return run
+
+        ledger.update_contact = update_contact
+        ledger.create_contact = after(create, lambda cid: cid)
+        ledger.link_candidate = after(link, lambda cid: cid)
+        ledger.resolve_review = after(resolve, lambda row: row["id"])
+
+    def _dnc_reason(self, campaign_id, cand_id, email=None):
+        """Why this person must not get a Gmail draft or send right now, from canonical state; else None."""
+        reason = self.ledger.dnc_block(campaign_id, cand_id)
+        if reason:
+            return reason
+        if (self.outreach.contact(campaign_id, cand_id) or {}).get("do_not_contact"):
+            return "marked do not contact"
+        emails = {norm_email(email)}
+        try:
+            profile = self.store.research(campaign_id)["profiles"].get(cand_id) or {}
+            emails.add(norm_email(profile.get("contact_email")))
+            if self.workspace:
+                cand = next(
+                    (c for c in self.store.candidates(campaign_id)["candidates"] if c["candidate_id"] == cand_id), {}
+                )
+                if self.workspace.is_do_not_contact(campaign_id, cand_id, cand, profile)[0]:
+                    return "do-not-contact policy"
+        except (KeyError, RuntimeError, ValueError):
+            pass  # campaign data unavailable; the other checks and revalidation still apply
+        for e in emails - {None}:
+            hit = self.cache.q("SELECT reason FROM suppressions WHERE email=?", (e,))
+            if hit:
+                return f"recipient is on the {hit[0]['reason']} list"
+        return None
+
+    def enforce_dnc(self, contact_id, transition=False, extra_pairs=()):
+        """The one do-not-contact operation. Idempotent; call under dnc_lock (re-entrant).
+
+        Enabled: project the flag to every linked campaign record, suppress every known address, cancel scheduled
+        sends and open follow-ups everywhere, invalidate approved/gmail_draft_created drafts, and audit. Existing
+        Gmail drafts are left alone. Disabled: only the projected flag clears; cancelled work and the
+        suppression stay until a human restores them."""
+        with self.dnc_lock:
+            c = self.ledger.contact(contact_id)
+            pairs = list(
+                dict.fromkeys(
+                    (r["campaign_id"], r["candidate_id"])
+                    for r in self.cache.q(
+                        "SELECT campaign_id, candidate_id FROM person_links WHERE contact_id=?", (contact_id,)
+                    )
+                )
+            )
+            pairs += [p for p in extra_pairs if p not in pairs]
+            if not c["do_not_contact"]:
+                lifted = sum(
+                    self.cache.x(
+                        "UPDATE outreach_contacts SET do_not_contact=0 WHERE campaign_id=? AND candidate_id=?", p
+                    )
+                    for p in pairs
+                )
+                if transition:
+                    self.outbox.audit(
+                        None,
+                        "dnc_removed",
+                        contact_id=contact_id,
+                        campaigns=sorted({p[0] for p in pairs}),
+                        projections_cleared=lifted,
+                        note="cancelled work and suppressions stay in place",
+                    )
+                return
+            emails = {norm_email(c["email"])}
+            for cid, cand in pairs:
+                try:
+                    emails.add(norm_email((self.store.research(cid)["profiles"].get(cand) or {}).get("contact_email")))
+                except (KeyError, RuntimeError, ValueError):
+                    pass
+            emails -= {None}
+            why = "contact is on the do-not-contact list"
+            suppressed, cancelled = self.outbox.block_contact(pairs, sorted(emails), why)
+            followups = invalidated = projected = 0
+            for cid, cand in pairs:
+                projected += self.cache.x(
+                    "UPDATE outreach_contacts SET do_not_contact=1 WHERE campaign_id=? AND candidate_id=? AND do_not_contact=0",
+                    (cid, cand),
+                )
+                open_steps = self.cache.q(
+                    f"SELECT 1 FROM followups WHERE campaign_id=? AND candidate_id=? AND status IN ({','.join('?' * len(OPEN_STEPS))})",  # noqa: S608 - placeholders only
+                    (cid, cand, *OPEN_STEPS),
+                )
+                row = self.outreach.contact(cid, cand)
+                if open_steps or (row and row["sequence_state"] != "stopped"):
+                    self.outreach.stop(cid, cand, "contact marked do not contact", "dnc")
+                    followups += len(open_steps)
+                invalidated += self._invalidate_drafts(cid, cand, why)
+            if transition or suppressed or cancelled or followups or invalidated or projected:
+                self.outbox.audit(
+                    None,
+                    "dnc_enforced",
+                    contact_id=contact_id,
+                    campaigns=sorted({p[0] for p in pairs}),
+                    suppressed=suppressed,
+                    cancelled_sends=cancelled,
+                    followups_cancelled=followups,
+                    drafts_invalidated=invalidated,
+                )
+
+    def _invalidate_drafts(self, campaign_id, cand_id, reason):
+        """Approved and gmail_draft_created records go back to needs_review; the Gmail draft itself is kept."""
+        n = 0
+        for d in self.cache.list_drafts(campaign_id):
+            if d["candidate_id"] == cand_id and d["status"] in ("approved", "gmail_draft_created"):
+                issues = d["issues"] + ([reason] if reason not in d["issues"] else [])
+                self.cache.upsert_draft(
+                    campaign_id, cand_id, d["template_version"], status="needs_review", issues=issues
+                )
+                n += 1
+        return n
+
+    def _dnc_resync(self, campaign_id, cand_id):
+        """A correction or new link may have made this candidate match a do-not-contact contact."""
+        if not self.workspace:
+            return
+        cand = next((c for c in self.store.candidates(campaign_id)["candidates"] if c["candidate_id"] == cand_id), {})
+        profile = self.store.research(campaign_id)["profiles"].get(cand_id) or {}
+        dnc, row = self.workspace.is_do_not_contact(campaign_id, cand_id, cand, profile)
+        if dnc:
+            self.enforce_dnc(row["id"], extra_pairs=[(campaign_id, cand_id)])
+
+    def set_candidate_dnc(self, campaign_id, cand_id, reason="manual"):
+        """Campaign-level do-not-contact: resolve the canonical contact (linking one if needed) and enforce."""
+        cand = next((c for c in self.store.candidates(campaign_id)["candidates"] if c["candidate_id"] == cand_id), {})
+        profile = self.store.research(campaign_id)["profiles"].get(cand_id) or {}
+        contact_id = self.ledger.linked(campaign_id, cand_id)
+        if not contact_id and self.workspace:
+            try:
+                contact_id = self.workspace._linked_contact(campaign_id, cand_id, cand, profile)["id"]
+            except ValueError:
+                pass  # ambiguous match under review
+        if contact_id:
+            self.ledger.update_contact(contact_id, {"do_not_contact": True, "dnc_reason": reason})
+            self.enforce_dnc(contact_id, extra_pairs=[(campaign_id, cand_id)])
+        else:  # ambiguous match under review: still stop this candidate's work
+            self.outbox.block_contact([(campaign_id, cand_id)], [], "marked do not contact")
+            self.cache.x(
+                "UPDATE outreach_contacts SET do_not_contact=1 WHERE campaign_id=? AND candidate_id=?",
+                (campaign_id, cand_id),
+            )
+            self.outreach.stop(campaign_id, cand_id, "marked do not contact", "dnc")
+            self._invalidate_drafts(campaign_id, cand_id, "contact is on the do-not-contact list")
+
     def _outcome_changed(self, campaign_id, cand_id, outcome, source, at, note=""):
         """Converge Gmail, send-queue, manual, analytics, and contact-history outcomes."""
         if outcome in analytics.OUTCOMES:
@@ -1668,17 +1864,14 @@ class CampaignService:
                         cand_id,
                     )
         self.outbox.converge_outcome(campaign_id, cand_id, outcome)
-        if outcome in ("bounced", "declined", "do_not_contact"):
+        if outcome in ("bounced", "declined"):
             profile = self.store.research(campaign_id)["profiles"].get(cand_id) or {}
             email = profile.get("contact_email")
-            reason = "do_not_contact" if outcome == "do_not_contact" else outcome
             existing = self.cache.q("SELECT reason FROM suppressions WHERE email=?", ((email or "").lower(),))
-            if email and (not existing or existing[0]["reason"] != reason):
-                self.outbox.suppress(email, reason)
+            if email and (not existing or existing[0]["reason"] != outcome):
+                self.outbox.suppress(email, outcome)
         if outcome == "do_not_contact":
-            contact_id = self.ledger.linked(campaign_id, cand_id)
-            if contact_id and not self.ledger.contact(contact_id)["do_not_contact"]:
-                self.ledger.update_contact(contact_id, {"do_not_contact": True, "dnc_reason": note or "manual"})
+            self.set_candidate_dnc(campaign_id, cand_id, note or "manual")
 
     @staticmethod
     def export_one(d, profile):
