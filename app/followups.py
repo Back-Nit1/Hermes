@@ -599,6 +599,7 @@ class Outreach:
             ),
             (to, f["subject"], f["body"]),
             dict(thread_id=c["gmail_thread_id"], in_reply_to=c["rfc_message_id"]),
+            who=(cid, cand),
         )
         if res.get("gmail_draft_id"):
             ids = res.get("ids") or {}
