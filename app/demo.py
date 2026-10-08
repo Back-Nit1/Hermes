@@ -217,6 +217,9 @@ class DemoModel:
                         "research_interests": interests,
                         "fit_reason": f"Their work on {interests[0]} matches the requested focus.",
                         "evidence": ev,
+                        "field_evidence": dict.fromkeys(
+                            ("summary", "research_interests", "fit_reason", "affiliation"), list(range(len(ev)))
+                        ),
                     },
                     {url} if ok else set(),
                 )
@@ -227,6 +230,7 @@ class DemoModel:
             "research_interests": [],
             "fit_reason": "",
             "evidence": [],
+            "field_evidence": {"summary": [], "research_interests": [], "fit_reason": [], "affiliation": []},
         }, set()
 
     def _draft(self, text):
