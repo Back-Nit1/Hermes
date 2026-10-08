@@ -22,7 +22,7 @@ Follow these steps in order:
    sudo .venv/bin/pip install --require-hashes --no-deps -r requirements.lock  # includes pypdf (PDF research)
    ```
 
-2. **Configure** `/etc/hermes/hermes.env` (owner root, mode 0600, readable via systemd only):
+2. **Configure** `/etc/hermes/hermes.env` (owner root, mode 0600, readable via systemd only; create it with `sudo install -m 600 -o root -g root /dev/null /etc/hermes/hermes.env` before pasting secrets in):
 
    ```ini
    HERMES_MODE=remote

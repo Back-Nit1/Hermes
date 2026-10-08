@@ -45,7 +45,9 @@ production CSP).
 
 The app reads the environment and `.env` once at startup and validates all settings together. If anything is wrong,
 it prints every problem and exits with status 2. It never starts half-configured. See `.env.example` for all
-settings. Examples of what gets rejected:
+settings. Create `.env` owner-only (`install -m 600 .env.example .env`, or `chmod 600 .env` on an existing file): it holds
+the OpenAI key and `HERMES_SECRET_KEY`. On POSIX the app prints a `WARNING` to stderr at startup if `.env` is readable by
+group or others; it does not refuse to start and never prints the file's contents. Examples of what gets rejected:
 
 - a non-loopback `APP_HOST` in local mode;
 - remote mode without an `https://` public URL or a valid secret key, or with `APP_TOKEN` set;
@@ -153,6 +155,12 @@ python -m app.ops backup /secure/place/hermes-2026-09-26.hbk     # app must be s
 python -m app.ops verify-backup /secure/place/hermes-2026-09-26.hbk   # decrypt + full verification, touches no data root
 python -m app.ops restore /secure/place/hermes-2026-09-26.hbk    # app must be stopped
 ```
+
+On a systemd host use `deploy/hermes-restore.sh BACKUP.hbk` instead: it stops the service, restores, and restarts it on
+every exit path (restore failure, SIGTERM or Ctrl-C) if it was running before, then waits for `/readyz`. A service that
+was already stopped stays stopped. The exit status is the restore's own failure code, or 1 if the restart or readiness
+check failed. A SIGTERM during the restore takes effect after the restore step finishes, never mid-swap. Covered by
+`tests/test_restore_script.py` (fake `systemctl`/`setpriv`/`curl`; nothing real is restored).
 
 - **Consistency contract:** `backup` takes the exclusive data-root lock (the same lock a running app holds), so it
   **refuses to run while the app is up** ("stop the app first"), and no app can start while it runs. JSON files,

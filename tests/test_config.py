@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from cryptography.fernet import Fernet
 
@@ -47,3 +49,19 @@ def test_unwritable_data_root(tmp_path):
     ro.mkdir(mode=0o500)
     with pytest.raises(ConfigError, match="not writable"):
         load_config({"DATA_ROOT": str(ro / "sub")})
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_load_env_warns_when_env_file_is_group_or_world_readable(tmp_path, capsys, monkeypatch):
+    from app.config import load_env
+
+    monkeypatch.setenv("ZZ_SECRET_VALUE", "preset")
+    f = tmp_path / ".env"
+    f.write_text("ZZ_SECRET_VALUE=hunter2\n")
+    f.chmod(0o644)
+    load_env(f)
+    err = capsys.readouterr().err
+    assert "chmod 600" in err and "hunter2" not in err
+    f.chmod(0o600)
+    load_env(f)
+    assert capsys.readouterr().err == ""
