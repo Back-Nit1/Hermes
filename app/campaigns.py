@@ -1102,8 +1102,7 @@ class CampaignService:
             else:
                 accepted.append({"candidate_id": cand_id, "job_id": job_id})
         rejected.extend(
-            {"candidate_id": cand_id, "reason": "do_not_contact", "detail": reason}
-            for cand_id, reason in dnc.items()
+            {"candidate_id": cand_id, "reason": "do_not_contact", "detail": reason} for cand_id, reason in dnc.items()
         )
         rejected.extend(
             {"candidate_id": cand_id, "reason": "not_researched", "detail": "fresh research profile required"}

@@ -90,9 +90,7 @@ def test_partial_research_and_draft_admission_returns_candidate_results(tmp_path
     svc.jobs.submit = admit
     result = svc.research(cid, ids)
     assert result["accepted"] == [{"candidate_id": ids[0], "job_id": "job_first"}]
-    assert result["rejected"] == [
-        {"candidate_id": ids[1], "reason": "queue_saturated", "detail": "lane full"}
-    ]
+    assert result["rejected"] == [{"candidate_id": ids[1], "reason": "queue_saturated", "detail": "lane full"}]
 
     svc.store.update_research(cid, lambda doc: doc["profiles"].update({i: profile(i) for i in ids}))
     calls.clear()

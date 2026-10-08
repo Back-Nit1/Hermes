@@ -222,9 +222,7 @@ class GmailDrafts:
             for d in drafts[:remaining]:
                 full = _run(self.svc.users().drafts().get(userId="me", id=d["id"], format="metadata"))
                 headers = full.get("message", {}).get("payload", {}).get("headers", [])
-                if any(
-                    h.get("name", "").lower() == "x-outreach-key" and h.get("value") == key for h in headers
-                ):
+                if any(h.get("name", "").lower() == "x-outreach-key" and h.get("value") == key for h in headers):
                     return _ids(
                         full,
                         next(
