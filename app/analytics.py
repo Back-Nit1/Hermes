@@ -6,8 +6,7 @@ that stage was reached, so re-running work can't double-count. Outcomes after
 sending (replied, interested, ...) are recorded by the user via the API/UI.
 
 Unknown is `None` (JSON null), zero is 0. A rate with an empty denominator is
-unknown, scheduled sends are unknown (HERMES has no scheduler), cost is unknown
-unless per-token prices are configured, and usage is unknown for breakdowns it
+unknown, cost is unknown unless per-token prices are configured, and usage is unknown for breakdowns it
 can't be attributed to (organization, template, sender).
 """
 
@@ -38,7 +37,7 @@ FUNNEL = (
     "meeting_booked",
 )
 OUTCOMES = ("replied", "interested", "declined", "bounced", "meeting_booked")
-STAGES = set(FUNNEL) - {"scheduled"} | {"research_failed"}
+STAGES = set(FUNNEL) | {"research_failed"}
 GROUPS = ("campaign", "campaign_type", "sender", "template", "organization")
 CLOSED = {"replied", "interested", "declined", "bounced", "meeting_booked"}  # stops a follow-up reminder
 # Existing interaction kinds (see Workspace.record_contacted and rule followup_no_reply) so the contact ledger sees outcomes.
@@ -176,6 +175,11 @@ def backfill(svc):
                 milestone(svc.cache, cid, d["candidate_id"], "approved", d["updated_at"])
             if d.get("invited_at"):
                 delivery(svc.cache, cid, d["candidate_id"], d["invited_at"])
+        for s in svc.cache.q(
+            "SELECT candidate_id,MIN(approved_at) approved_at FROM sends WHERE campaign_id=? GROUP BY candidate_id",
+            (cid,),
+        ):
+            milestone(svc.cache, cid, s["candidate_id"], "scheduled", s["approved_at"])
         for c in svc.cache.q(
             "SELECT candidate_id,sent_at FROM outreach_contacts WHERE campaign_id=? AND sent_at IS NOT NULL", (cid,)
         ):
@@ -272,7 +276,6 @@ def _rate(n, d):
 def aggregate(rows):
     has = lambda s: sum(s in r["stages"] for r in rows)
     counts = {s: has(s) for s in FUNNEL}
-    counts["scheduled"] = None  # no scheduled sending in HERMES: unknown, not zero
     counts["research_failed"] = has("research_failed")
     attempted = sum(bool({"researched", "research_failed"} & r["stages"]) for r in rows)
     positive = sum(bool({"interested", "meeting_booked"} & r["stages"]) for r in rows)
@@ -388,7 +391,6 @@ def report(svc, campaign_id=None, start=None, end=None, group_by="campaign"):
         "failures": failures(svc, scope, start, end),
         "activity": activity(svc, scope, start, end),
         "notes": {
-            "scheduled": "HERMES has no scheduled sending; shown as unknown.",
             "outcomes": "Sent and later outcomes are recorded by you; 0 means none recorded. No open tracking.",
             "cost": None
             if _cost(0, 0) is not None
@@ -534,7 +536,7 @@ def to_csv(rep, kind):
                 ]
             )
     elif kind == "rows":
-        stages = [s for s in FUNNEL if s != "scheduled"] + ["research_failed"]
+        stages = [*FUNNEL, "research_failed"]
         w = csv.writer(buf)
         w.writerow(
             [

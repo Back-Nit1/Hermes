@@ -11,12 +11,13 @@ $("#btn-research").addEventListener("click", run(async () => {
   const ids = need();
   await post("/select", { candidate_ids: ids, action: "select" });
   const r = await post("/research", { candidate_ids: ids });
-  toast(r.candidates.length ? `Researching ${r.candidates.length}. Already-researched people are skipped.` : "Everyone selected is already researched.");
+  toast(r.accepted_ids.length ? `Researching ${r.accepted_ids.length}.${r.rejected_ids.length ? ` ${r.rejected_ids.length} could not enter the queue; retry them.` : ""}` :
+    r.rejected_ids.length ? `No jobs admitted; retry ${r.rejected_ids.length} when queue capacity is available.` : "Everyone selected is already researched.");
   refresh();
 }));
 $("#btn-generate").addEventListener("click", run(async () => {
   const r = await post("/drafts/generate", { candidate_ids: need(), ...selectedTemplate() });
-  toast(`Drafting ${r.queued.length}.${r.skipped_not_researched.length ? ` ${r.skipped_not_researched.length} need research first.` : ""}`);
+  toast(`Drafting ${r.accepted_ids.length}.${r.rejected_ids.length ? ` ${r.rejected_ids.length} rejected or need attention.` : ""}`);
 }));
 $("#btn-followup").addEventListener("click", run(async () => {
   await post("/drafts/generate", { candidate_ids: need(), followup: true, ...selectedTemplate() });

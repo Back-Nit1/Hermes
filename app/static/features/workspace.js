@@ -118,7 +118,8 @@ function renderRows(cands) {
      sort === "name" ? a.name.localeCompare(b.name) : a.status.localeCompare(b.status)));
   if (!cands.length) { $("#rows").innerHTML = '<tr><td colspan="6" class="empty">No candidates match this filter.</td></tr>'; return; }
   $("#rows").innerHTML = cands.map((c) => {
-    const [statusLabel, cls] = RS[c.status] || [c.status, ""];
+    const stale = c.research_freshness?.is_stale;
+    const [statusLabel, cls] = stale ? ["stale · refresh", "bad"] : (RS[c.status] || [c.status, ""]);
     const email = c.email ? `<span class="${c.email_verified ? "ok" : "needs"}">${esc(c.email)}${c.email_verified ? " ✓" : " (unverified)"}</span>`
       : c.status === "discovered" || c.status === "selected" ? "—" : '<span class="needs">missing</span>';
     const draft = c.draft_status ? `${esc(c.draft_status.replaceAll("_", " "))}${c.draft_flags ? ` <span class="needs">· ${c.draft_flags} flag${c.draft_flags > 1 ? "s" : ""}</span>` : ""}` : "—";
@@ -178,6 +179,7 @@ export async function renderDetail(id) {
     html += `<section><p class="note">Not researched yet. ${c.fit_hint ? `Discovery note: ${esc(c.fit_hint)}` : ""}</p>
       <button class="small primary" data-act="research">Research this person</button></section>`;
   } else {
+    if (p.freshness?.is_stale) html += `<p class="banner warn">Research is stale (${esc(p.freshness.age_hours ?? "unknown")} hours old; freshness limit ${esc(p.freshness.freshness_hours)} hours). Refresh it before drafting.</p>`;
     const contact = p.contact_email
       ? `<div class="contact ${p.email_verified_on_page ? "" : "needs"}">${esc(p.contact_email)} — ${p.email_verified_on_page ? `verified on ${link(p.contact_source_url, "page")}` : "NOT verified on a page; check before sending"}</div>`
       : `<div class="contact needs">No public email found. Look it up manually; nothing was guessed.</div>`;

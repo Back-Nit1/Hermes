@@ -341,10 +341,22 @@ def _migrate_v3(db):
         db.execute("ALTER TABLE jobs ADD COLUMN started_at REAL")
 
 
+def _migrate_v4(db):
+    """Track Gmail attempts separately from the last completed successful sync."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(outreach_contacts)")}
+    for name, kind in (
+        ("sync_attempted_at", "REAL"),
+        ("sync_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("sync_retry_at", "REAL"),
+    ):
+        if name not in columns:
+            db.execute(f"ALTER TABLE outreach_contacts ADD COLUMN {name} {kind}")
+
+
 # Append only; entry i is applied when PRAGMA user_version <= i.
 # V1 keeps IF NOT EXISTS because databases created before versioning already have those tables.
 # V3 is a callable (see migrate_sqlite): the contacts->people merge needs matching logic, not just SQL.
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, _migrate_v3]
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, _migrate_v3, _migrate_v4]
 
 
 PAGE_TTL = 7 * 86400
