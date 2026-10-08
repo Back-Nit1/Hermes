@@ -27,7 +27,7 @@ isolation behind HTTPS (see [docs/remote-deployment.md](docs/remote-deployment.m
 python3.13 -m venv .venv
 .venv/bin/pip install --require-hashes --no-deps -r requirements-dev.lock   # pinned, hash-checked
 .venv/bin/python -m playwright install chromium   # only needed for the browser test
-cp .env.example .env            # leave OPENAI_API_KEY empty for demo mode
+install -m 600 .env.example .env  # created owner-only (chmod 600); leave OPENAI_API_KEY empty for demo mode
 .venv/bin/python -m app.api     # validates config, prints http://127.0.0.1:8765/?t=<token>; open that exact link
 .venv/bin/python -m pytest -q   # full suite (unit, workflow, remote isolation, load, browser)
 ```
