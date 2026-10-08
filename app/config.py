@@ -9,6 +9,7 @@ import ipaddress
 import math
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,8 @@ class Config:
 def load_env(path=ROOT / ".env"):
     """Minimal .env reader; real environment variables win."""
     if path.exists():
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            print(f"WARNING: {path} is readable by other users; run: chmod 600 {path}", file=sys.stderr)
         for line in path.read_text().splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
