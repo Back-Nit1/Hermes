@@ -28,6 +28,8 @@ jobs:
         run: python -m app.ops check-schemas
       - name: Tests
         run: python -m pytest -q
+      - name: Accuracy evals (offline, no credentials)
+        run: python -m evals.run
 
   secrets:
     runs-on: ubuntu-24.04

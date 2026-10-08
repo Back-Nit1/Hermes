@@ -86,15 +86,25 @@ class OpenAIModel:
         return data, _cited_urls(resp)
 
 
+class Citations(set):
+    """All URLs the provider returned (a plain set for old callers), split by how they were returned:
+    `annotations` are claim-level url_citation annotations on the answer text; `inventory` are
+    web_search result URLs the model merely had access to. Neither means the page was fetched."""
+
+    def __init__(self, annotations=(), inventory=()):
+        super().__init__(set(annotations) | set(inventory))
+        self.annotations, self.inventory = set(annotations), set(inventory)
+
+
 def _cited_urls(resp):
-    urls = set()
+    annotations, inventory = set(), set()
     for item in getattr(resp, "output", []) or []:
         for part in getattr(item, "content", None) or []:
             for ann in getattr(part, "annotations", None) or []:
                 if getattr(ann, "url", None):
-                    urls.add(ann.url)
+                    annotations.add(ann.url)
         action = getattr(item, "action", None)
         for src in getattr(action, "sources", None) or []:
             if getattr(src, "url", None):
-                urls.add(src.url)
-    return urls
+                inventory.add(src.url)
+    return Citations(annotations, inventory)

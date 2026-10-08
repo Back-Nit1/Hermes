@@ -1,0 +1,29 @@
+{
+ "candidate_identity_precision": {
+  "min": 1.0
+ },
+ "evidence_support_precision": {
+  "min": 1.0
+ },
+ "verified_email_precision": {
+  "min": 1.0
+ },
+ "unsupported_personalization_rate": {
+  "max": 0.0
+ },
+ "draft_evidence_coverage": {
+  "min": 0.85
+ },
+ "dnc_false_negative_rate": {
+  "max": 0.5
+ },
+ "label_violations": {
+  "max": 0
+ },
+ "stale_labelled": {
+  "min": 1.0
+ },
+ "unsupported_drafts_built": {
+  "max": 0
+ }
+}
