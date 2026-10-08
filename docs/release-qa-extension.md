@@ -1,29 +1,43 @@
 # Extension release QA checklist
 
-Branch `agent/extension-release-qa`, base `b9c77ac` (main). Status: **BLOCKED** — extension, extension backend and DNC work are not committed by their owners yet.
+Branch `agent/extension-release-qa`. Merged: backend `b83c3e7`, DNC `7bae67a`, extension `e8ba4ba` + `dc890d7`
+(merge commits `2a78862`, `4625fb7`, `7dacc8c`). Baseline main `b9c77ac`.
 
-## Upstream state at run time
-| Branch | Commits ahead of main | Working tree |
-|---|---|---|
-| agent/chrome-extension | 0 | untracked `extension/` only |
-| agent/extension-backend | 0 | uncommitted `app/extension_api.py`, `app/extension_auth.py`, `app/api.py` edits |
-| agent/dnc-safety | 0 | uncommitted edits to campaigns/followups/sending/workspace |
+**Verdict: NOT SHIPPABLE.** The extension client and the backend speak different contracts; real pairing fails (see F1).
 
-## Results on main (b9c77ac)
+## Results
 | Check | Result | Evidence |
 |---|---|---|
-| Full Python suite (non-browser) | PASS | 227 passed, 8 deselected, 64s |
-| Browser + load tests | PASS | 8 passed, 28s |
-| ruff check | PASS | All checks passed |
-| ruff format --check | PASS | 70 files already formatted |
-| pip-audit (requirements.lock) | FAIL | oauthlib 3.3.1 PYSEC-2026-4114, fix 4.0.0; transitive via google-auth-oauthlib 1.4.1 / requests-oauthlib 2.0.0 |
-| Secret scan | PARTIAL | gitleaks not installed; regex grep of tracked files found nothing; no tracked `.env` |
-| Schema checks | NOT RUN | no separate schema command found in repo |
+| Full Python suite incl. browser/load | PASS | 271 passed (before packaging test) |
+| ruff check / format | PASS | clean, 78+ files |
+| pip-audit (requirements.lock) | FAIL | oauthlib 3.3.1 PYSEC-2026-4114, fix 4.0.0 (transitive via google-auth-oauthlib/requests-oauthlib) |
+| Secret scan | PARTIAL | gitleaks absent; regex grep of tracked files clean; no tracked `.env` |
+| Extension unit + syntax check | PASS | `npm test` 14/14, `npm run check` ok |
+| Manifest validation | PASS | MV3; no `<all_urls>`, no `host_permissions`, no Gmail host, no webRequest/debugger/cookies |
+| Chromium `--load-extension` | PASS | service worker starts, options + side panel load, zero console/page errors |
+| Demo-transport pair + states | PASS | status "Connected"; screenshots below |
+| Narrow (360px) / desktop (1280px) | PASS | no horizontal scroll, 0 unnamed controls (scripted check only, not full axe audit) |
+| DNC (scheduling, follow-ups, capture) | PASS | `tests/test_dnc_safety.py`, `tests/test_extension_api.py` in the 271 |
+| Deterministic packaging | PASS | `scripts/package_extension.py`; two builds identical, sha256 `c4de7e6f9f773b43542ff9ccc34d518d733d06942d192cb24696034f07b4d1b3` for `hermes-extension-0.1.0.zip` (re-check after any extension change) |
+| Pair against real backend | **FAIL** | F1 |
+| Revoke / reconnect, preview/commit vs real backend | BLOCKED by F1 | |
+| Service-worker restart, backend-offline recovery (real backend) | BLOCKED by F1 | demo mode only |
 
-## Not runnable until upstream commits land
-Extension unit/manifest validation; Chromium `--load-extension`; pair/revoke/reconnect; capture preview/commit against the local backend; DNC during scheduling and follow-up generation; permission regression (no `<all_urls>`, no Gmail DOM, no privileged APIs); narrow/desktop accessibility; service-worker restart and backend-offline recovery; deterministic packaging with version and checksum; core-state screenshots.
+## Findings
+**F1 (blocker): contract mismatch.** Extension `shared/api-client.js` calls `POST /api/extension/pair`, `GET /api/extension/summary`,
+`/campaigns`, `/captures/preview`, `/captures`, `DELETE /api/extension/device` with camelCase bodies (`deviceToken`, `previewId`) and
+`X-Hermes-API-Version` headers. Backend `app/extension_api.py` serves `/extension/v1/pair/exchange`, `/status`, `/campaigns`,
+`/capture/preview`, `/capture/commit` with snake_case (`device_name`, `campaign_id`, `token`), no `/summary`, no previewId.
+Live probe: pairing code created OK, then extension client `pair()` -> `unauthorized 401 "missing or bad app token"` (path sits under
+the dashboard `/api/` guard). Owners must align one side; not fixed here (not my files, and it is a design call).
+**F2:** manifest `optional_host_permissions` includes `https://*/*` (all HTTPS hosts, requestable at runtime). Not `<all_urls>`, but wider
+than a pinned backend origin. `scripting` + `activeTab` are the only injection scopes; keep, but decide whether `https://*/*` is needed.
+**F3:** demo transport (`mock/`) ships in the release zip.
+**F4:** pairing placeholder `HERMES-AB12` (11 chars) vs backend minimum code length 8; confirm code format after F1.
+**F5:** backend-native `/extension/v1/pair/exchange` returned 403 to a plain urllib call (origin allowlist/edge rules); not investigated.
+**F6:** oauthlib advisory above.
 
-## Unresolved risks
-1. oauthlib vulnerability: needs upstream-compatible bump decision (4.0.0 may break requests-oauthlib pin).
-2. No gitleaks binary; secret scan is regex-only.
-3. All extension items above unverified.
+## Screenshots (`docs/release-qa/`)
+options-unpaired-desktop, options-paired-desktop, options-paired-narrow, sidepanel-overview-desktop, sidepanel-overview-narrow.
+Capture-preview, DNC-blocked, revoked and offline states not captured against a real backend (blocked by F1); the demo-mode
+equivalents are covered by the extension's own mock tests only.
