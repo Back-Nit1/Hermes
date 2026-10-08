@@ -19,7 +19,7 @@ from .config import Config
 from .contracts import EMAIL_RE, INTAKE_FIELDS, clean_intake, dedupe_key, normalize_url
 from .followups import OPEN_STEPS, Outreach
 from .gmail import GmailAuthError
-from .jobs import Coordinator
+from .jobs import Coordinator, QueueSaturated
 from .ledger import MANUAL_INTERACTIONS, Ledger, clean_tags, norm_email
 from .openai_client import BudgetExceeded, ModelError
 from .operational_metrics import metrics
@@ -195,6 +195,7 @@ class CampaignService:
         self.outbox.on_delivery = self._record_delivery
         self.outbox.on_outcome = self._outbound_outcome
         self.gmail_sync_interval = cfg.gmail_sync_interval
+        self.research_freshness_seconds = cfg.research_freshness_hours * 3600
         self.last_gmail_sync = None  # epoch seconds of the last successful sync, for metrics
         self.backup_dir = cfg.backup_dir
         self.send_every = send_every  # None lets tests drive the scheduler explicitly
@@ -282,7 +283,8 @@ class CampaignService:
             self._require(campaign_id)
         res = await asyncio.to_thread(self.outreach.sync, campaign_id)
         res["followups_queued"] = self.outreach.tick()
-        self.last_gmail_sync = time.time()
+        if not res.get("error") and not res.get("errors"):
+            self.last_gmail_sync = time.time()
         return res
 
     def _link_all(self, campaign_id):
@@ -771,9 +773,25 @@ class CampaignService:
         }
 
     # ---------------------------------------------------------------- research
+    def _profile_freshness(self, profile):
+        completed = profile and profile.get("status") in ("researched", "needs_contact_review")
+        researched_at = profile.get("researched_at") if profile else None
+        try:
+            timestamp = datetime.fromisoformat(researched_at.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, TypeError, ValueError):
+            timestamp = None
+        age = max(0.0, self.now() - timestamp) if timestamp is not None else None
+        stale = bool(completed and (age is None or age > self.research_freshness_seconds))
+        return {
+            "state": "stale" if stale else "fresh" if completed else "missing",
+            "is_stale": stale,
+            "researched_at": researched_at,
+            "age_hours": round(age / 3600, 1) if age is not None else None,
+            "freshness_hours": self.research_freshness_seconds / 3600,
+        }
+
     def _fresh_profile(self, profiles, cand_id):
-        p = profiles.get(cand_id)
-        return p and p.get("status") in ("researched", "needs_contact_review")
+        return self._profile_freshness(profiles.get(cand_id))["state"] == "fresh"
 
     def research(self, campaign_id, candidate_ids=None, refresh=False):
         """Select + enqueue research. Skips excluded and already-researched unless refresh."""
@@ -799,10 +817,24 @@ class CampaignService:
         self.store.update_candidates(
             campaign_id, lambda d: [c.update(status="selected") for c in d["candidates"] if c["candidate_id"] in todo]
         )
+        accepted, rejected = [], []
         for cid in todo:
-            if refresh:
+            if refresh or self._profile_freshness(profiles.get(cid))["state"] == "stale":
                 self.cache.drop_research(f"{campaign_id}:{cid}:")
-        return {"queued": [self.jobs.submit(campaign_id, "research", cid) for cid in todo], "candidates": todo}
+            try:
+                job_id = self.jobs.submit(campaign_id, "research", cid)
+            except QueueSaturated as e:
+                rejected.append({"candidate_id": cid, "reason": "queue_saturated", "detail": str(e)})
+            else:
+                accepted.append({"candidate_id": cid, "job_id": job_id})
+        return {
+            "queued": [item["job_id"] for item in accepted],
+            "candidates": [item["candidate_id"] for item in accepted],
+            "accepted": accepted,
+            "accepted_ids": [item["candidate_id"] for item in accepted],
+            "rejected": rejected,
+            "rejected_ids": [item["candidate_id"] for item in rejected],
+        }
 
     def _set_status(self, campaign_id, cand_id, status, error=None):
         def apply(doc):
@@ -900,11 +932,12 @@ class CampaignService:
                     }
                 else:
                     raise outlines.OutlineBlocked("no recorded earlier email for this contact; follow-up blocked")
-        ident = self._identity_for(intake)
-        if ident and not (intake.get("outreach_goal") or "").strip() and ident.get("default_ask"):
-            intake = {**intake, "outreach_goal": ident["default_ask"]}
+        sender_details = self._sender_for(intake)
+        ident = sender_details["identity"]
+        if sender_details["ask"] != (intake.get("outreach_goal") or "").strip():
+            intake = {**intake, "outreach_goal": sender_details["ask"]}
         if template and self.workspace:
-            sender = ((ident or {}).get("biography") or intake.get("sender_background") or "").strip()
+            sender = sender_details["biography"]
             if not sender:
                 raise outlines.OutlineBlocked("sender background is required before drafting")
             selected_evidence = outlines.pick_evidence(profile)
@@ -958,7 +991,7 @@ class CampaignService:
                 "recipient_name": profile.get("name"),
                 "organization": profile.get("organization") or "their organization",
                 "role": profile.get("role") or "their role",
-                "sender_background": intake.get("sender_background"),
+                "sender_background": sender,
                 "event_details": intake.get("event_details"),
                 "outreach_goal": ask,
                 "specific_connection": outline.get("specific_connection") or "their relevant work",
@@ -980,13 +1013,11 @@ class CampaignService:
                 ],
             )
         else:
-            outline = outlines.build_outline(
-                intake, profile, (ident or {}).get("biography") or intake.get("sender_background"), followup, earlier
-            )
+            outline = outlines.build_outline(intake, profile, sender_details["biography"], followup, earlier)
         if ident:
             outline["sender"] = {k: ident.get(k) for k in ("display_name", "organization", "role")}
-            if ident.get("signature"):
-                outline["signature"] = ident["signature"]
+            if sender_details["signature"]:
+                outline["signature"] = sender_details["signature"]
                 outline["closing_note"] = "End with the signoff line only; the app appends the sender's signature."
         return outline, profile
 
@@ -1001,6 +1032,18 @@ class CampaignService:
                 f"sender identity {iid} no longer exists; pick another in the campaign settings"
             ) from None
 
+    def _sender_for(self, intake):
+        """Resolve every sender-owned drafting field through one identity-aware path."""
+        identity = self._identity_for(intake)
+        biography = ((identity or {}).get("biography") or intake.get("sender_background") or "").strip()
+        ask = (intake.get("outreach_goal") or (identity or {}).get("default_ask") or "").strip()
+        return {
+            "identity": identity,
+            "biography": biography,
+            "ask": ask,
+            "signature": ((identity or {}).get("signature") or "").strip(),
+        }
+
     def _contactable(self, campaign_id, cand_id):
         """Enforce the global do-not-contact gate for every external action."""
         reason = self.ledger.dnc_block(campaign_id, cand_id)
@@ -1011,6 +1054,7 @@ class CampaignService:
         self._require_active(campaign_id)
         if not candidate_ids:
             raise Rejected("pass explicit candidate_ids")
+        candidate_ids = list(dict.fromkeys(candidate_ids))
         cdoc = self.store.candidates(campaign_id)
         profiles = self.store.research(campaign_id)["profiles"]
         cmap = {c["candidate_id"]: c for c in cdoc["candidates"]}
@@ -1049,8 +1093,28 @@ class CampaignService:
             )
             for c in ready
         ]
+        accepted, rejected = [], []
+        for cand_id, arg in zip(ready, args, strict=True):
+            try:
+                job_id = self.jobs.submit(campaign_id, "write", arg)
+            except QueueSaturated as e:
+                rejected.append({"candidate_id": cand_id, "reason": "queue_saturated", "detail": str(e)})
+            else:
+                accepted.append({"candidate_id": cand_id, "job_id": job_id})
+        rejected.extend(
+            {"candidate_id": cand_id, "reason": "do_not_contact", "detail": reason}
+            for cand_id, reason in dnc.items()
+        )
+        rejected.extend(
+            {"candidate_id": cand_id, "reason": "not_researched", "detail": "fresh research profile required"}
+            for cand_id in sorted(set(candidate_ids) - set(researched))
+        )
         return {
-            "queued": [self.jobs.submit(campaign_id, "write", arg) for arg in args],
+            "queued": [item["job_id"] for item in accepted],
+            "accepted": accepted,
+            "accepted_ids": [item["candidate_id"] for item in accepted],
+            "rejected": rejected,
+            "rejected_ids": [item["candidate_id"] for item in rejected],
             "blocked_do_not_contact": list(dnc),
             "skipped_do_not_contact": dnc,
             "skipped_not_researched": sorted(set(candidate_ids) - set(researched)),
@@ -1502,6 +1566,7 @@ class CampaignService:
     def confirm_send(self, campaign_id, cand_id, approval_hash, when=None):
         payload, verified, at = self._send_payload(campaign_id, cand_id, when)
         row = self.outbox.approve(payload, approval_hash, verified, at)
+        analytics.milestone(self.cache, campaign_id, cand_id, "scheduled", row["approved_at"])
         self.cache.event(campaign_id, f"{cand_id}: send approved for {self.outbox.local(row['scheduled_at'])}")
         return self.outbox.view(row)
 
@@ -2013,6 +2078,7 @@ class CampaignService:
                     "sent_at": o.get("sent_at"),
                     "sequence_state": o.get("sequence_state"),
                     "send_status": sends.get(c["candidate_id"]),
+                    "research_freshness": self._profile_freshness(p),
                 }
             )
         meta = self.ledger.campaign_meta(campaign_id)
@@ -2086,9 +2152,12 @@ class CampaignService:
         analytics_timeline = analytics.timeline(self.cache, campaign_id, cand_id)
         for event in analytics_timeline:
             event.update(kind=event["stage"], detail="", source="system")
+        profile = self.store.research(campaign_id)["profiles"].get(cand_id)
+        if profile:
+            profile = {**profile, "freshness": self._profile_freshness(profile)}
         return {
             "candidate": cand,
-            "profile": self.store.research(campaign_id)["profiles"].get(cand_id),
+            "profile": profile,
             "draft": d,
             "corrections": [
                 r

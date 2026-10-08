@@ -20,6 +20,7 @@ from datetime import datetime
 
 from . import outlines, writer
 from .gmail import GmailAuthError
+from .jobs import QueueSaturated
 
 log = logging.getLogger("followups")
 
@@ -38,6 +39,8 @@ OPEN_STEPS = (
 DONE_STEPS = ("sent", "skipped", "cancelled", "deleted")
 BOUNCE_RE = re.compile(r"mailer-daemon|postmaster|mail delivery (subsystem|system)", re.I)
 SYNC_LIMIT = 25  # threads per sync run; oldest-synced first
+SYNC_BACKOFF_BASE = 60
+SYNC_BACKOFF_MAX = 3600
 DAY = 86400
 
 
@@ -293,8 +296,17 @@ class Outreach:
                 "campaign_id=? AND candidate_id=? AND step=? AND status='scheduled'",
                 (now, *key),
             ):
-                self.svc.jobs.submit(key[0], "followup", f"{key[1]}#{key[2]}")
-                queued += 1
+                try:
+                    self.svc.jobs.submit(key[0], "followup", f"{key[1]}#{key[2]}")
+                except (QueueSaturated, RuntimeError) as e:
+                    self.cache.x(
+                        "UPDATE followups SET status='scheduled', attempts=MAX(attempts-1,0), updated_at=? "
+                        "WHERE campaign_id=? AND candidate_id=? AND step=? AND status='generating'",
+                        (now, *key),
+                    )
+                    log.info("follow-up queue admission deferred: %s", e)
+                else:
+                    queued += 1
         self._mark_no_response(now)
         return queued
 
@@ -332,12 +344,15 @@ class Outreach:
             )
             return
         intake = self.svc.store.candidates(cid)["intake"]
+        sender = self.svc._sender_for(intake)
+        if sender["ask"] != (intake.get("outreach_goal") or "").strip():
+            intake = {**intake, "outreach_goal": sender["ask"]}
         profile = self.svc.store.research(cid)["profiles"].get(cand) or {}
         try:
             outline = outlines.build_followup_outline(
                 intake,
                 profile,
-                intake.get("sender_background"),
+                sender["biography"],
                 self._steps(c)[step],
                 self.prior_contact(cid, cand, step),
             )
@@ -357,6 +372,8 @@ class Outreach:
                 key,
             )  # next tick retries until max_attempts
             raise
+        if sender["signature"] and sender["signature"] not in d["body"]:
+            d["body"] = f"{d['body'].rstrip()}\n\n{sender['signature']}"
         subject = _re(c["subject"])  # Gmail threads only when the subject matches
         issues = writer.check_draft(subject, d["body"], outline, profile, d["evidence_ids"])
         if self.cache.x(
@@ -398,26 +415,31 @@ class Outreach:
             return {**out, "error": "Gmail not connected"}
         if not g.can_sync:
             return {**out, "error": "Reply tracking needs the gmail.metadata scope; run `python -m app.gmail`"}
-        sql = f"""SELECT * FROM outreach_contacts WHERE gmail_thread_id IS NOT NULL AND sequence_state!='stopped'
-                  AND (outcome IS NULL OR outcome IN ('awaiting_reply','no_response'))
-                  {"AND campaign_id=?" if campaign_id else ""} ORDER BY COALESCE(last_synced_at, 0) LIMIT ?"""
-        for c in self.cache.q(sql, (campaign_id, limit) if campaign_id else (limit,)):
+        now = self.svc.now()
+        sql = """SELECT * FROM outreach_contacts WHERE gmail_thread_id IS NOT NULL AND sequence_state!='stopped'
+                 AND (outcome IS NULL OR outcome IN ('awaiting_reply','no_response'))
+                 AND COALESCE(sync_retry_at,0)<=?"""
+        args = [now]
+        if campaign_id:
+            sql += " AND campaign_id=?"
+            args.append(campaign_id)
+        sql += " ORDER BY COALESCE(sync_attempted_at,0), COALESCE(last_synced_at,0) LIMIT ?"
+        args.append(limit)
+        for c in self.cache.q(sql, args):
+            self._set(c["campaign_id"], c["candidate_id"], sync_attempted_at=now)
             try:
                 r = self.sync_contact(c)
             except GmailAuthError as e:
+                self._sync_failed(c, str(e), now)
                 self.gmail_error = str(e)
                 return {**out, "error": str(e)}
             except KeyError:
-                self._set(
-                    c["campaign_id"],
-                    c["candidate_id"],
-                    last_synced_at=self.svc.now(),
-                    sync_error="thread no longer in Gmail (draft deleted?)",
-                )
+                self._sync_failed(c, "thread no longer in Gmail (draft deleted?)", now)
                 out["errors"] += 1
                 continue
             except Exception as e:
                 log.warning("sync %s failed: %s", c["gmail_thread_id"], e)
+                self._sync_failed(c, f"{type(e).__name__}: {str(e)[:160]}", now)
                 out["errors"] += 1
                 continue
             out["checked"] += 1
@@ -426,10 +448,20 @@ class Outreach:
         self.gmail_error = None
         return out
 
+    def _sync_failed(self, contact, error, attempted_at):
+        failures = int(contact.get("sync_failures") or 0) + 1
+        delay = min(SYNC_BACKOFF_BASE * (2 ** min(failures - 1, 6)), SYNC_BACKOFF_MAX)
+        self._set(
+            contact["campaign_id"],
+            contact["candidate_id"],
+            sync_failures=failures,
+            sync_retry_at=attempted_at + delay,
+            sync_error=error,
+        )
+
     def sync_contact(self, c):
         cid, cand = c["campaign_id"], c["candidate_id"]
         msgs = sorted(self.svc.gmail.thread(c["gmail_thread_id"]), key=lambda m: m["at"])
-        self._set(cid, cand, last_synced_at=self.svc.now(), sync_error=None)
         sent = [m for m in msgs if "SENT" in m["labels"]]
         followups = self.cache.q("SELECT * FROM followups WHERE campaign_id=? AND candidate_id=?", (cid, cand))
         followup_ids = {f.get("gmail_message_id") for f in followups if f.get("gmail_message_id")}
@@ -473,6 +505,14 @@ class Outreach:
             if kind != "auto_reply" and (self.contact(cid, cand) or {}).get("outcome") in OPEN_OUTCOMES:
                 self.set_outcome(cid, cand, "bounced" if kind == "bounce" else "replied", "gmail", at=m["at"])
                 result = kind
+        self._set(
+            cid,
+            cand,
+            last_synced_at=self.svc.now(),
+            sync_error=None,
+            sync_failures=0,
+            sync_retry_at=None,
+        )
         return result
 
     # ---------------------------------------------------------------- queue

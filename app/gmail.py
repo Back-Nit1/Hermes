@@ -42,6 +42,10 @@ class GmailAuthError(Exception):
     """Credentials unusable (expired/revoked/missing scope). The user must re-consent."""
 
 
+class GmailReconciliationIncomplete(Exception):
+    """A bounded Gmail search ended before every draft page was examined."""
+
+
 def http_status(exc):
     return getattr(getattr(exc, "resp", None), "status", None)
 
@@ -201,21 +205,43 @@ class GmailDrafts:
             self._sender = self.svc.users().getProfile(userId="me").execute()["emailAddress"]
         return self._sender
 
-    def find_by_key(self, key, scan=100):
-        """Reconcile: look through recent drafts for our header. Bounded scan. Returns ids or None."""
-        res = _run(self.svc.users().drafts().list(userId="me", maxResults=scan))
-        for d in res.get("drafts", []):
-            full = _run(self.svc.users().drafts().get(userId="me", id=d["id"], format="metadata"))
-            headers = full.get("message", {}).get("payload", {}).get("headers", [])
-            if any(h.get("name") == "X-Outreach-Key" and h.get("value") == key for h in headers):
-                return _ids(
-                    full,
-                    next(
-                        (h.get("value") for h in headers if h.get("name", "").lower() == "message-id"),
-                        rfc_message_id(key),
-                    ),
-                )
-        return None
+    def find_by_key(self, key, scan=500):
+        """Reconcile across bounded draft pages; raise when the bound makes absence uncertain."""
+        token, examined, pages, seen_tokens = None, 0, 0, set()
+        page_limit = max(1, min(scan, 50))
+        while examined < scan:
+            if pages >= page_limit:
+                raise GmailReconciliationIncomplete(f"draft search stopped after {examined} records")
+            kwargs = {"userId": "me", "maxResults": min(100, scan - examined)}
+            if token:
+                kwargs["pageToken"] = token
+            res = _run(self.svc.users().drafts().list(**kwargs))
+            pages += 1
+            drafts = res.get("drafts", [])
+            remaining = scan - examined
+            for d in drafts[:remaining]:
+                full = _run(self.svc.users().drafts().get(userId="me", id=d["id"], format="metadata"))
+                headers = full.get("message", {}).get("payload", {}).get("headers", [])
+                if any(
+                    h.get("name", "").lower() == "x-outreach-key" and h.get("value") == key for h in headers
+                ):
+                    return _ids(
+                        full,
+                        next(
+                            (h.get("value") for h in headers if h.get("name", "").lower() == "message-id"),
+                            rfc_message_id(key),
+                        ),
+                    )
+            examined += min(len(drafts), remaining)
+            token = res.get("nextPageToken")
+            if len(drafts) > remaining:
+                raise GmailReconciliationIncomplete(f"draft search stopped after {examined} records")
+            if not token:
+                return None
+            if token in seen_tokens or examined >= scan:
+                raise GmailReconciliationIncomplete(f"draft search stopped after {examined} records")
+            seen_tokens.add(token)
+        raise GmailReconciliationIncomplete(f"draft search stopped after {examined} records")
 
     def message(self, message_id):
         """Metadata for one known Gmail message; never searches or reads a body."""

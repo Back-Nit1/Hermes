@@ -77,7 +77,7 @@ def expected_counts(svc, cid):
         "research_failed": sum(p["status"] == "research_failed" for p in profiles),
         "drafted": len({d["candidate_id"] for d in drafts if d["status"] != "blocked"}),
         "approved": len({d["candidate_id"] for d in drafts if d["status"] in ("approved", "gmail_draft_created")}),
-        "scheduled": None,
+        "scheduled": 0,
         "sent": len({d["candidate_id"] for d in drafts if d.get("invited_at")}),
         "replied": inter("reply"),
         "interested": inter("interested"),
@@ -141,7 +141,7 @@ def test_analytics_and_notifications_acceptance(tmp_path):
             "positive_response_rate": 0.5,
         }
         assert 4.9 < by[a]["time_to_reply_hours"]["median"] < 5.1
-        assert rep["counts"]["scheduled"] is None and rep["usage"]["estimated_cost_usd"] is None  # unknown, not 0
+        assert rep["counts"]["scheduled"] == 0 and rep["usage"]["estimated_cost_usd"] is None
         assert rep["usage"]["api_calls"] == sum(svc.cache.usage(c)["api_calls"] for c in (a, b)) > 0
         assert rep["usage"]["processing_seconds"] is not None
         assert {f["type"] for f in rep["failures"]} >= {"job_failed", "research_failed"}
@@ -220,7 +220,7 @@ def test_analytics_and_notifications_acceptance(tmp_path):
         assert sum(bool(x["replied_at"]) for x in rows) == full["counts"]["replied"]
         agg = list(csv.DictReader(io.StringIO(client.get("/api/analytics/export", params={"kind": "aggregate"}).text)))
         assert {x["group"]: int(x["sent"]) for x in agg} == {x["group"]: x["counts"]["sent"] for x in full["breakdown"]}
-        assert all(x["scheduled"] == "" and x["estimated_cost_usd"] == "" for x in agg)  # unknown stays blank
+        assert all(x["scheduled"] == "0" and x["estimated_cost_usd"] == "" for x in agg)
 
         # ---- read / dismiss
         items = client.get("/api/notifications").json()["items"]
