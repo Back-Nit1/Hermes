@@ -639,7 +639,7 @@ class Workspace:
     def invalidate_candidate_approvals(self, campaign_id, candidate_id, reason):
         changed = 0
         for d in self.cache.list_drafts(campaign_id):
-            if d["candidate_id"] != candidate_id or d["status"] != "approved":
+            if d["candidate_id"] != candidate_id or d["status"] not in ("approved", "gmail_draft_created"):
                 continue
             issues = d["issues"] + ([reason] if reason not in d["issues"] else [])
             self.cache.upsert_draft(

@@ -21,6 +21,7 @@ import logging
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -102,6 +103,10 @@ class Outbox:
         self.materialize = lambda row: []  # exact approved attachment bytes; also revalidates their hashes
         self.on_delivery = lambda row: None
         self.on_outcome = lambda row, outcome, at: None
+        self.dnc_reason = lambda row: None  # set by CampaignService: canonical do-not-contact reason, or None
+        # Held around every DNC write and around each check+Gmail mutation, so once a DNC path returns
+        # no Gmail draft/send can begin or still be in flight for that person.
+        self.guard = threading.RLock()
         with cache.lock:
             cache.db.executescript(SCHEMA)
             columns = {r[1] for r in cache.db.execute("PRAGMA table_info(sends)")}
@@ -252,6 +257,28 @@ class Outbox:
         for r in self._rows("status='scheduled' AND lower(recipient)=?", (email,)):
             self._cancel(r["send_id"], f"recipient on {reason} list")
         return {"email": email, "reason": reason}
+
+    def block_contact(self, pairs, emails, reason):
+        """Suppress every address and cancel every scheduled send for these candidates/addresses. Idempotent."""
+        with self.guard:
+            suppressed = [
+                e
+                for e in emails
+                if not self.cache.q("SELECT 1 FROM suppressions WHERE email=? AND reason='do_not_contact'", (e,))
+            ]
+            for e in suppressed:
+                self.suppress(e, "do_not_contact")
+            rows = {}
+            for cid, cand in pairs:
+                rows.update(
+                    {
+                        r["send_id"]: r
+                        for r in self._rows("status='scheduled' AND campaign_id=? AND candidate_id=?", (cid, cand))
+                    }
+                )
+            for e in emails:
+                rows.update({r["send_id"]: r for r in self._rows("status='scheduled' AND lower(recipient)=?", (e,))})
+            return suppressed, [sid for sid in rows if self._cancel(sid, reason)]
 
     def suppressions(self):
         return self.cache.q("SELECT * FROM suppressions ORDER BY at DESC")
@@ -450,7 +477,7 @@ class Outbox:
                 ):
                     self.audit(r["send_id"], "failed", reason="missed window")
                 continue
-            reason = self.recipient_problem(r["recipient"], True) or self.revalidate(r)
+            reason = self.recipient_problem(r["recipient"], True) or self.dnc_reason(r) or self.revalidate(r)
             if reason:
                 self._cancel(r["send_id"], reason)
                 continue
@@ -474,9 +501,20 @@ class Outbox:
             did = r["gmail_draft_id"]
             if not did:
                 attachments = self.materialize(r)
-                created = self.gmail.create(
-                    r["recipient"], r["subject"], r["body"], key, reply_to=r.get("reply_to"), attachments=attachments
-                )
+                with self.guard:  # DNC cannot land between this check and the Gmail call
+                    reason = self.recipient_problem(r["recipient"], True) or self.dnc_reason(r)
+                    if reason:
+                        self._transition(sid, "sending", "cancelled", error=reason, finished_at=self.clock())
+                        self.audit(sid, "cancelled", reason=reason, before="drafts.create")
+                        return
+                    created = self.gmail.create(
+                        r["recipient"],
+                        r["subject"],
+                        r["body"],
+                        key,
+                        reply_to=r.get("reply_to"),
+                        attachments=attachments,
+                    )
                 did = created.get("draft_id") if isinstance(created, dict) else created
                 ids = created if isinstance(created, dict) else {}
                 self._update(
@@ -498,14 +536,19 @@ class Outbox:
                 self._update(sid, status="cancelled" if self.settings()["emergency_stop"] else "scheduled")
                 self.audit(sid, "held_before_send", emergency_stop=self.settings()["emergency_stop"])
                 return
-            current = self.row(sid)
-            reason = self.recipient_problem(current["recipient"], True) or self.revalidate(current)
-            if reason:
-                self._transition(sid, "sending", "cancelled", error=reason, finished_at=self.clock())
-                self.audit(sid, "cancelled", reason=reason, before="drafts.send")
-                return
-            stage = "send"
-            res = self.gmail.send_draft(did)
+            with self.guard:
+                current = self.row(sid)
+                reason = (
+                    self.recipient_problem(current["recipient"], True)
+                    or self.dnc_reason(current)
+                    or self.revalidate(current)
+                )
+                if reason:
+                    self._transition(sid, "sending", "cancelled", error=reason, finished_at=self.clock())
+                    self.audit(sid, "cancelled", reason=reason, before="drafts.send")
+                    return
+                stage = "send"
+                res = self.gmail.send_draft(did)
         except Exception as e:
             status = http_status(e)
             err = f"{stage}: {type(e).__name__}: {str(e)[:200]}"
