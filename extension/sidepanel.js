@@ -142,7 +142,10 @@ document.addEventListener("click", (event) => {
 (async () => {
   const state = await message(MESSAGE.getState);
   appState.settings = state.settings;
-  if (state.captureError) setConnection(state.captureError.state, state.captureError.message);
   await loadSummary();
+  if (state.captureError) {
+    setConnection(state.captureError.state, state.captureError.message);
+    await chrome.storage.local.remove("captureError");
+  }
   if (state.pendingCapture) await renderCapture(state.pendingCapture);
 })();

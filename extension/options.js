@@ -40,17 +40,22 @@ $("#mock-mode").addEventListener("change", async () => {
     state("permission_denied", "Revoke the current device token before changing transports.");
     return;
   }
-  await saveMode();
-  $("#pairing-code").placeholder = $("#mock-mode").checked ? "HERMES-DEMO" : "HERMES-AB12";
-  state(current.deviceToken ? "online" : "unpaired", $("#mock-mode").checked ? "Demo transport enabled. No backend calls will be made." : undefined);
+  try {
+    await saveMode();
+    $("#pairing-code").placeholder = $("#mock-mode").checked ? "HERMES-DEMO" : "HERMES-AB12";
+    state($("#mock-mode").checked || current.deviceToken ? "online" : "unpaired", $("#mock-mode").checked ? "Demo transport enabled. No backend calls will be made." : undefined);
+  } catch (error) {
+    state("offline", error.message);
+    announce(error.message);
+  }
 });
 
 $("#connection-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const baseUrl = normalizeBaseUrl($("#base-url").value);
-  if (!(await ensurePermission(baseUrl))) { state("permission_denied"); return; }
-  await saveMode();
   try {
+    const baseUrl = normalizeBaseUrl($("#base-url").value);
+    if (!(await ensurePermission(baseUrl))) { state("permission_denied"); return; }
+    await saveMode();
     const result = await message(MESSAGE.pair, { baseUrl, code: $("#pairing-code").value, deviceName: $("#device-name").value });
     current = { ...current, baseUrl, deviceToken: result.deviceToken, backendVersion: result.backendVersion, apiVersion: result.apiVersion };
     $("#pairing-code").value = "";
@@ -75,7 +80,7 @@ $("#revoke-button").addEventListener("click", async () => {
   $("#base-url").value = current.baseUrl;
   $("#mock-mode").checked = current.mockMode;
   $("#pairing-code").placeholder = current.mockMode ? "HERMES-DEMO" : "HERMES-AB12";
-  if (current.deviceToken) state("online", current.mockMode ? "Demo transport enabled. No backend calls will be made." : undefined);
+  if (current.mockMode || current.deviceToken) state("online", current.mockMode ? "Demo transport enabled. No backend calls will be made." : undefined);
   const origin = originPattern(current.baseUrl);
   $("#permission-origin").textContent = await chrome.permissions.contains({ origins: [origin] }) ? origin : "Not granted";
 })();
